@@ -34,9 +34,8 @@ class HighProbabilityStrategy(Strategy):
         # Check each outcome for high probability
         for i, token_id in enumerate(tokens):
             outcome_name = outcomes[i] if i < len(outcomes) else f"Outcome_{i}"
-            try:
-                price_data = clob_client.get_price(token_id)
-            except Exception:
+            price_data = clob_client.get_price(token_id)
+            if price_data is None:
                 continue
 
             ask_price = price_data["ask"]

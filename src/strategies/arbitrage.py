@@ -29,10 +29,9 @@ class ArbitrageStrategy(Strategy):
         if len(tokens) != 2:
             return []
 
-        try:
-            price_yes = clob_client.get_price(tokens[0])
-            price_no = clob_client.get_price(tokens[1])
-        except Exception:
+        price_yes = clob_client.get_price(tokens[0])
+        price_no = clob_client.get_price(tokens[1])
+        if price_yes is None or price_no is None:
             return []
 
         ask_yes = price_yes["ask"]

@@ -9,8 +9,8 @@ class MockClobClient:
     def __init__(self, prices: dict[str, dict]):
         self._prices = prices
 
-    def get_price(self, token_id: str) -> dict:
-        return self._prices.get(token_id, {"bid": 0.5, "ask": 0.5, "mid": 0.5})
+    def get_price(self, token_id: str) -> dict | None:
+        return self._prices.get(token_id)
 
 
 class TestHighProbability(unittest.TestCase):

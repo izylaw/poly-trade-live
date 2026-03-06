@@ -38,26 +38,27 @@ class PolymarketClobClient:
         bal = float(balance.get("balance", 0)) if isinstance(balance, dict) else 0.0
         return bal
 
-    @retry(max_attempts=3)
-    def get_orderbook(self, token_id: str) -> dict:
+    def get_orderbook(self, token_id: str):
         client = self._get_client()
-        book = client.get_order_book(token_id)
-        return book
+        return client.get_order_book(token_id)
 
-    @retry(max_attempts=3)
-    def get_price(self, token_id: str) -> dict:
-        client = self._get_client()
-        book = client.get_order_book(token_id)
+    def get_price(self, token_id: str) -> dict | None:
+        """Returns price dict or None if no orderbook exists."""
+        try:
+            client = self._get_client()
+            book = client.get_order_book(token_id)
+        except Exception as e:
+            if "404" in str(e):
+                return None
+            raise
         best_bid = float(book.bids[0].price) if book.bids else 0.0
         best_ask = float(book.asks[0].price) if book.asks else 1.0
         mid = (best_bid + best_ask) / 2 if best_bid and best_ask != 1.0 else best_bid or best_ask
         return {"bid": best_bid, "ask": best_ask, "mid": mid}
 
-    @retry(max_attempts=3)
-    def get_midpoint(self, token_id: str) -> float:
-        client = self._get_client()
-        mid = client.get_midpoint(token_id)
-        return float(mid) if mid else 0.0
+    def get_midpoint(self, token_id: str) -> float | None:
+        price = self.get_price(token_id)
+        return price["mid"] if price else None
 
     @retry(max_attempts=2)
     def post_order(self, token_id: str, side: str, price: float, size: float,
