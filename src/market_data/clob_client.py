@@ -1,6 +1,6 @@
 import logging
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams, OrderArgs, OrderType
 from src.config.settings import Settings
 from src.utils.retry import retry
 
@@ -17,15 +17,17 @@ class PolymarketClobClient:
 
     def _get_client(self) -> ClobClient:
         if self._client is None:
+            creds = ApiCreds(
+                api_key=self.settings.poly_api_key,
+                api_secret=self.settings.poly_api_secret,
+                api_passphrase=self.settings.poly_api_passphrase,
+            )
             self._client = ClobClient(
                 CLOB_API_URL,
                 key=self.settings.poly_private_key,
                 chain_id=CHAIN_ID,
-                creds={
-                    "apiKey": self.settings.poly_api_key,
-                    "secret": self.settings.poly_api_secret,
-                    "passphrase": self.settings.poly_api_passphrase,
-                },
+                creds=creds,
+                signature_type=0,
             )
             logger.info("CLOB client initialized")
         return self._client
@@ -33,10 +35,11 @@ class PolymarketClobClient:
     @retry(max_attempts=3)
     def get_balance(self) -> float:
         client = self._get_client()
-        balance = client.get_balance_allowance()
-        # balance_allowance has 'balance' key with USDC balance
-        bal = float(balance.get("balance", 0)) if isinstance(balance, dict) else 0.0
-        return bal
+        result = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+        raw = float(result.get("balance", 0)) if isinstance(result, dict) else 0.0
+        return raw / 1e6  # USDC has 6 decimals
 
     def get_orderbook(self, token_id: str):
         client = self._get_client()
@@ -87,12 +90,12 @@ class PolymarketClobClient:
         client = self._get_client()
         return client.get_orders()
 
-    def derive_api_creds(self) -> dict:
+    def derive_api_creds(self) -> ApiCreds:
         client = ClobClient(
             CLOB_API_URL,
             key=self.settings.poly_private_key,
             chain_id=CHAIN_ID,
         )
-        creds = client.derive_api_key()
+        creds = client.create_or_derive_api_creds()
         logger.info("API credentials derived successfully")
         return creds
