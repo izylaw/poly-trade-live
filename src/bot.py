@@ -20,6 +20,9 @@ from src.core.order_manager import OrderManager
 from src.core.engine import TradingEngine
 from src.strategies.high_probability import HighProbabilityStrategy
 from src.strategies.arbitrage import ArbitrageStrategy
+from src.strategies.btc_updown import BtcUpdownStrategy
+from src.strategies.safe_compounder import SafeCompounderStrategy
+from src.strategies.sports_daily import SportsDailyStrategy
 
 logger = logging.getLogger("poly-trade")
 
@@ -43,7 +46,7 @@ class Bot:
         gamma = GammaClient()
         clob = PolymarketClobClient(s)
         market_filter = MarketFilter(s)
-        scanner = MarketScanner(s, gamma, market_filter)
+        scanner = MarketScanner(s, gamma, market_filter, clob_client=clob)
 
         # Risk
         circuit_breaker = CircuitBreaker(
@@ -61,6 +64,9 @@ class Bot:
         strategies = [
             HighProbabilityStrategy(s),
             ArbitrageStrategy(s),
+            BtcUpdownStrategy(s),
+            SafeCompounderStrategy(s),
+            SportsDailyStrategy(s),
         ]
 
         # Adaptive

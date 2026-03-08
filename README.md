@@ -19,6 +19,8 @@ The bot runs a 30-second trading loop:
 
 **Arbitrage** — Detects when `ask(YES) + ask(NO) < $1.00` for guaranteed profit. Uses FOK orders for immediate execution. Rare but risk-free when found.
 
+**Sports Daily** — Trades daily sports events using market microstructure signals: spread capture (maker bids in wide spreads), book imbalance (follow informed flow), and favorite value (exploit favorite-longshot bias). Self-discovering — finds markets via Gamma tag search with parallel pagination. Uses batch orderbook fetches for efficiency.
+
 ## Risk Management
 
 Every trade must pass all checks:
@@ -44,9 +46,9 @@ The bot tracks progress toward $1,000 and adjusts behavior:
 | Condition | Level | Max Trade | Min Confidence | Strategies |
 |-----------|-------|-----------|---------------|------------|
 | Ahead of schedule | Conservative | 5% | 0.85 | High-prob only |
-| On track | Moderate | 10% | 0.70 | Both |
-| Behind <20% | Aggressive | 15% | 0.60 | Both |
-| Behind >20% | Ultra | 15% | 0.55 | Both |
+| On track | Moderate | 10% | 0.70 | All enabled |
+| Behind <20% | Aggressive | 15% | 0.60 | All enabled |
+| Behind >20% | Ultra | 15% | 0.55 | All enabled |
 | Below starting capital | Emergency | 5% | 0.90 | High-prob only |
 
 If the initial target rate isn't sustainable, the bot recalculates the timeline automatically.
@@ -135,7 +137,10 @@ src/
 ├── strategies/
 │   ├── base.py              # Abstract strategy interface
 │   ├── high_probability.py  # Near-certain outcome buying
-│   └── arbitrage.py         # YES+NO spread detection
+│   ├── arbitrage.py         # YES+NO spread detection
+│   ├── sports_daily.py      # Sports microstructure (spread, imbalance, favorite)
+│   ├── btc_updown.py        # BTC up/down interval trading
+│   └── safe_compounder.py   # Safe compounding strategy
 ├── risk/
 │   ├── risk_manager.py      # Gates every trade
 │   ├── kelly.py             # Half-Kelly position sizing
@@ -167,4 +172,4 @@ src/
 python -m pytest tests/ -v
 ```
 
-Covers: Kelly sizing, risk manager gates, strategy signal generation, goal tracking, and aggression tuning.
+Covers: Kelly sizing, risk manager gates, strategy signal generation, goal tracking, aggression tuning, sports daily discovery/signals, and market scanner pipeline.

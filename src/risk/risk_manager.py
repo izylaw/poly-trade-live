@@ -19,6 +19,8 @@ class TradeSignal:
     strategy: str
     expected_value: float = 0.0
     order_type: str = "GTC"
+    post_only: bool = False
+    cancel_after_ts: float = 0.0
 
 
 @dataclass
@@ -30,12 +32,25 @@ class ApprovedTrade:
 
 
 class RiskManager:
+    STRATEGY_MIN_CONFIDENCE = {
+        "btc_updown": 0.55,
+        "safe_compounder": 0.78,
+        "sports_daily": 0.55,
+        "high_probability": 0.06,
+    }
+
     def __init__(self, settings: Settings, circuit_breaker: CircuitBreaker):
         self.settings = settings
         self.cb = circuit_breaker
         # Overridable by aggression tuner
         self.max_single_trade_pct = settings.max_single_trade_pct
         self.min_confidence = 0.70
+
+    def _get_min_confidence(self, strategy: str) -> float:
+        override = self.STRATEGY_MIN_CONFIDENCE.get(strategy)
+        if override is not None:
+            return override
+        return self.min_confidence
 
     def evaluate(self, signal: TradeSignal, balance: float,
                  open_positions: list[dict], portfolio_exposure: float) -> ApprovedTrade | None:
@@ -51,7 +66,7 @@ class RiskManager:
             return None
 
         # Confidence check
-        if signal.confidence < self.min_confidence:
+        if signal.confidence < self._get_min_confidence(signal.strategy):
             logger.debug(f"Signal confidence {signal.confidence:.2f} below min {self.min_confidence:.2f}")
             return None
 

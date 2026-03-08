@@ -20,6 +20,7 @@ class LiveExecutor:
                 price=trade.signal.price,
                 size=trade.size,
                 order_type=trade.signal.order_type,
+                post_only=trade.signal.post_only,
             )
         except Exception as e:
             logger.error(f"Live order failed: {e}")
