@@ -269,12 +269,6 @@ class TradingEngine:
             # Close the position
             self.position_tracker.close_position(pos["id"], pnl)
 
-            # Update paper balance
-            if self.settings.paper_trading and self.executor.paper:
-                if won:
-                    self.executor.paper.balance += size  # receive $1 per share
-                # On loss: cost already deducted at fill time
-
             # Update the trade record's PnL
             try:
                 trade = self.trade_log.get_trade_for_position(market_id, pos.get("token_id", ""))

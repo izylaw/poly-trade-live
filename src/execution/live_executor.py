@@ -61,6 +61,7 @@ class LiveExecutor:
                 "token_id": trade.signal.token_id,
                 "outcome": trade.signal.outcome,
                 "market_question": trade.signal.market_question,
+                "strategy": trade.signal.strategy,
                 "entry_price": trade.signal.price,
                 "size": trade.size,
                 "cost": round(trade.cost, 4),

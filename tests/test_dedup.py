@@ -490,5 +490,178 @@ class TestOrderManagerCancelOnLimit(unittest.TestCase):
         mock_clob.cancel_order.assert_not_called()
 
 
+class TestPerStrategyPositionLimit(unittest.TestCase):
+    """Per-strategy bucket limits: 10 high_probability, 15 other, 25 total."""
+
+    def setUp(self):
+        self.settings = Settings(
+            starting_capital=100.0,
+            hard_floor_pct=0.01,
+            max_single_trade_pct=0.10,
+            max_portfolio_exposure_pct=0.90,
+            max_open_positions=25,
+            max_high_prob_positions=10,
+            max_other_positions=15,
+            min_trade_size=0.50,
+            max_positions_per_market=1,
+        )
+        self.cb = CircuitBreaker()
+        self.cb.set_start_of_day_balance(100.0)
+        self.rm = RiskManager(self.settings, self.cb)
+
+    def _positions(self, n, strategy="high_probability"):
+        return [{"market_id": f"mkt_{strategy}_{i}", "cost": 1.0, "strategy": strategy}
+                for i in range(n)]
+
+    def test_high_prob_blocked_at_10(self):
+        """10 high_probability positions → next high_probability signal rejected."""
+        signal = _make_signal(market_id="mkt_hp_new", token_id="tok_hp_new", strategy="high_probability")
+        positions = self._positions(10, "high_probability")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=10.0)
+        self.assertIsNone(result)
+
+    def test_high_prob_allows_other(self):
+        """10 high_probability positions → btc_updown signal still allowed."""
+        signal = _make_signal(market_id="mkt_btc_new", token_id="tok_btc_new",
+                              strategy="btc_updown", price=0.50, confidence=0.70)
+        positions = self._positions(10, "high_probability")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=10.0)
+        self.assertIsNotNone(result)
+
+    def test_other_blocked_at_15(self):
+        """15 non-high_probability positions → next btc_updown signal rejected."""
+        signal = _make_signal(market_id="mkt_btc_new", token_id="tok_btc_new",
+                              strategy="btc_updown", price=0.50, confidence=0.70)
+        positions = self._positions(15, "btc_updown")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=15.0)
+        self.assertIsNone(result)
+
+    def test_other_allows_high_prob(self):
+        """15 non-high_probability positions → high_probability signal still allowed."""
+        signal = _make_signal(market_id="mkt_hp_new", token_id="tok_hp_new", strategy="high_probability")
+        positions = self._positions(15, "btc_updown")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=15.0)
+        self.assertIsNotNone(result)
+
+    def test_global_cap_at_25(self):
+        """10 high_prob + 15 other → any signal rejected (global limit)."""
+        signal = _make_signal(market_id="mkt_new", token_id="tok_new", strategy="high_probability")
+        positions = self._positions(10, "high_probability") + self._positions(15, "btc_updown")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=25.0)
+        self.assertIsNone(result)
+
+
+class TestConcurrentSessionPositionLimit(unittest.TestCase):
+    """Two PaperExecutor instances sharing the same DB see each other's positions."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA_SQL)
+        self.trade_log = TradeLog(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _make_approved_trade(self, market_id="mkt_1", token_id="tok_1",
+                             price=0.90, size=1.0):
+        signal = _make_signal(market_id=market_id, token_id=token_id, price=price)
+        trade = MagicMock()
+        trade.signal = signal
+        trade.size = size
+        trade.kelly_fraction = 0.1
+        return trade
+
+    def test_two_sessions_share_db_positions(self):
+        """Second executor sees positions created by the first via get_open_positions()."""
+        exec1 = PaperExecutor(starting_balance=100.0, trade_log=self.trade_log,
+                               max_open_positions=5)
+        exec2 = PaperExecutor(starting_balance=100.0, trade_log=self.trade_log,
+                               max_open_positions=5)
+
+        # Session 1 creates 3 positions
+        for i in range(3):
+            trade = self._make_approved_trade(market_id=f"mkt_s1_{i}", token_id=f"tok_s1_{i}")
+            result = exec1.execute(trade)
+            self.assertEqual(result["status"], "filled")
+
+        # Session 2 should see all 3 positions from session 1
+        self.assertEqual(len(exec2.get_open_positions()), 3)
+
+        # Session 2 creates 2 more
+        for i in range(2):
+            trade = self._make_approved_trade(market_id=f"mkt_s2_{i}", token_id=f"tok_s2_{i}")
+            result = exec2.execute(trade)
+            self.assertEqual(result["status"], "filled")
+
+        # Both sessions see all 5 positions
+        self.assertEqual(len(exec1.get_open_positions()), 5)
+        self.assertEqual(len(exec2.get_open_positions()), 5)
+
+
+class TestConcurrentSessionBalance(unittest.TestCase):
+    """Two PaperExecutor instances sharing the same DB have consistent balances."""
+
+    def setUp(self):
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript(SCHEMA_SQL)
+        self.trade_log = TradeLog(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _make_approved_trade(self, market_id="mkt_1", token_id="tok_1",
+                             price=0.90, size=1.0):
+        signal = _make_signal(market_id=market_id, token_id=token_id, price=price)
+        trade = MagicMock()
+        trade.signal = signal
+        trade.size = size
+        trade.kelly_fraction = 0.1
+        return trade
+
+    def test_concurrent_sessions_consistent_balance(self):
+        """Session A trades, session B's get_balance() reflects the deduction."""
+        exec_a = PaperExecutor(starting_balance=10.0, trade_log=self.trade_log)
+        exec_b = PaperExecutor(starting_balance=10.0, trade_log=self.trade_log)
+
+        self.assertAlmostEqual(exec_a.get_balance(), 10.0)
+        self.assertAlmostEqual(exec_b.get_balance(), 10.0)
+
+        # Session A places a trade
+        trade = self._make_approved_trade(price=0.90, size=2.0)
+        result = exec_a.execute(trade)
+        self.assertEqual(result["status"], "filled")
+
+        # Both sessions see the same reduced balance
+        self.assertAlmostEqual(exec_a.get_balance(), exec_b.get_balance(), places=2)
+        self.assertLess(exec_b.get_balance(), 10.0)
+
+    def test_balance_after_close(self):
+        """Balance correctly increases when a position is closed with profit."""
+        executor = PaperExecutor(starting_balance=10.0, trade_log=self.trade_log)
+
+        trade = self._make_approved_trade(price=0.50, size=2.0)
+        result = executor.execute(trade)
+        pos_id = result["position_id"]
+
+        balance_before_close = executor.get_balance()
+
+        # Close at a profit (exit_price > entry_price)
+        pnl = executor.close_position(pos_id, exit_price=0.80)
+        self.assertGreater(pnl, 0)
+
+        balance_after_close = executor.get_balance()
+        # Balance should increase: cost returned + pnl
+        self.assertGreater(balance_after_close, balance_before_close)
+
+    def test_close_nonexistent_position(self):
+        """Closing a non-existent position returns 0.0, balance unchanged."""
+        executor = PaperExecutor(starting_balance=10.0, trade_log=self.trade_log)
+        pnl = executor.close_position(999, exit_price=1.0)
+        self.assertEqual(pnl, 0.0)
+        self.assertAlmostEqual(executor.get_balance(), 10.0)
+
+
 if __name__ == "__main__":
     unittest.main()

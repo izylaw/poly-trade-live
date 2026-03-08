@@ -51,14 +51,15 @@ class TradeLog:
     def save_position(self, pos: dict) -> int:
         cur = self.conn.execute(
             """INSERT INTO positions
-               (market_id, token_id, outcome, market_question, entry_price,
-                size, cost, current_price, status, opened_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (market_id, token_id, outcome, market_question, strategy,
+                entry_price, size, cost, current_price, status, opened_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos["market_id"],
                 pos["token_id"],
                 pos["outcome"],
                 pos.get("market_question", ""),
+                pos.get("strategy", "unknown"),
                 pos["entry_price"],
                 pos["size"],
                 pos["cost"],
@@ -82,6 +83,20 @@ class TradeLog:
             "SELECT * FROM positions WHERE status='open'"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def compute_paper_balance(self, starting_capital: float) -> float:
+        """Derive paper balance from DB: starting_capital + closed PnL - open cost."""
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(realized_pnl), 0) as total_pnl FROM positions WHERE status='closed'"
+        ).fetchone()
+        row2 = self.conn.execute(
+            "SELECT COALESCE(SUM(cost), 0) as open_cost FROM positions WHERE status='open'"
+        ).fetchone()
+        return starting_capital + row["total_pnl"] - row2["open_cost"]
+
+    def get_position_by_id(self, position_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM positions WHERE id=?", (position_id,)).fetchone()
+        return dict(row) if row else None
 
     def get_trade_for_position(self, market_id: str, token_id: str) -> dict | None:
         """Find the filled trade record linked to a position."""

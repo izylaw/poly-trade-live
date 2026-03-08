@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS positions (
     token_id TEXT NOT NULL,
     outcome TEXT NOT NULL,
     market_question TEXT,
+    strategy TEXT NOT NULL DEFAULT 'unknown',
     entry_price REAL NOT NULL,
     size REAL NOT NULL,
     cost REAL NOT NULL,

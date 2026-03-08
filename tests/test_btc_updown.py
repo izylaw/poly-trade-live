@@ -479,6 +479,7 @@ class TestPaperMakerOrders:
 
         trade_log = MagicMock()
         trade_log.log_trade.return_value = 1
+        trade_log.compute_paper_balance.return_value = 10.0
 
         executor = PaperExecutor(starting_balance=10.0, trade_log=trade_log)
 
@@ -498,15 +499,16 @@ class TestPaperMakerOrders:
         assert result["trade_id"] == 1
         assert result["fill_price"] == 0.55
         assert result["size"] == 1.50
-        # Balance not deducted yet
-        assert executor.balance == 10.0
+        # Balance not deducted yet (derived from DB)
+        assert executor.get_balance() == 10.0
 
     def test_paper_fill_order_creates_position(self):
-        """fill_order() deducts balance and creates position."""
+        """fill_order() creates position and updates trade status."""
         from src.execution.paper_executor import PaperExecutor
 
         trade_log = MagicMock()
         trade_log.save_position.return_value = 42
+        trade_log.compute_paper_balance.return_value = 10.0 - 1.50 * 0.55
 
         executor = PaperExecutor(starting_balance=10.0, trade_log=trade_log)
 
@@ -523,7 +525,7 @@ class TestPaperMakerOrders:
         result = executor.fill_order(order)
         assert result["status"] == "filled"
         assert result["position_id"] == 42
-        assert executor.balance == pytest.approx(10.0 - 1.50 * 0.55, abs=0.01)
+        trade_log.save_position.assert_called_once()
         trade_log.update_trade_status.assert_called_once_with(1, "filled")
 
 
