@@ -1,7 +1,8 @@
 DEFAULTS = {
     "starting_capital": 10.0,
-    "target_balance": 1000.0,
-    "target_days": 60,
+    "target_balance": 20.0,
+    "target_days": 30,
+    "goal_start_date": "",  # ISO format (e.g. 2026-03-01T00:00:00+00:00), empty = auto-detect
     "paper_trading": True,
     "polygon_rpc_url": "https://polygon-rpc.com",
     "log_level": "INFO",
@@ -10,24 +11,95 @@ DEFAULTS = {
     "hard_floor_pct": 0.20,
     "max_single_trade_pct": 0.10,
     "max_portfolio_exposure_pct": 0.60,
-    "max_open_positions": 5,
+    "max_open_positions": 25,
+    "max_high_prob_positions": 10,
+    "max_other_positions": 15,
     "daily_loss_limit_pct": 0.15,
     "min_trade_size": 0.50,
     "consecutive_loss_pause": 3,
+    "max_positions_per_market": 1,
 
     # Market filter defaults
-    "min_volume_24h": 1000.0,
-    "min_liquidity": 500.0,
+    "min_volume_24h": 500.0,
+    "min_liquidity": 250.0,
     "max_spread": 0.05,
-    "min_time_to_resolution_hours": 2,
-    "max_markets": 50,
+    "min_time_to_resolution_hours": 0.5,
+    "max_markets": 500,
+
+    # Scanner defaults
+    "scanner_max_event_pages": 30,
+    "scanner_clob_cross_ref": False,
+    "scanner_clob_ttl": 1800,
 
     # Engine defaults
-    "scan_interval_seconds": 30,
+    "scan_interval_seconds": 15,
     "adapt_interval_seconds": 300,
 
     # Strategy defaults
-    "high_prob_min_price": 0.92,
+    "high_prob_min_price": 0.88,
     "high_prob_max_price": 0.98,
+    "high_prob_longshot_threshold": 0.20,
+    "high_prob_longshot_min_price": 0.02,
+    "high_prob_longshot_conf_multiplier": 2.0,
+    "high_prob_maker_ttl_hours": 4,
     "arb_min_spread": 0.005,
+
+    # Strategy selection
+    "only_strategies": [],  # empty = all strategies enabled
+
+    # BTC Up/Down strategy (v2 — price delta model)
+    "btc_updown_assets": ["BTC", "ETH", "SOL"],
+    "btc_updown_intervals": ["5m", "15m", "1h"],
+    "btc_updown_min_edge": 0.05,          # min (est_prob - ask) to trade
+    "btc_updown_5m_vol": 0.0010,          # BTC 5-min volatility (0.10%)
+    "btc_updown_logistic_k": 1.5,         # logistic steepness
+    "btc_updown_momentum_weight": 0.3,    # momentum confirmation weight
+    "btc_updown_min_ask": 0.03,           # min ask price to consider
+    "btc_updown_max_ask": 0.85,           # max ask price to consider
+    "btc_updown_taker_fee_rate": 0.0625,  # Polymarket dynamic taker fee rate
+    "btc_updown_maker_edge_cushion": 0.05,  # bid = est_prob - cushion
+
+    # Safe Compounder strategy
+    "safe_compounder_assets": ["BTC", "ETH", "SOL"],
+    "safe_compounder_intervals": ["5m", "15m", "1h"],
+    "safe_compounder_min_confidence": 0.78,
+    "safe_compounder_min_edge": 0.03,
+    "safe_compounder_maker_edge_cushion": 0.03,
+    "safe_compounder_min_window_progress": 0.65,
+    "safe_compounder_dual_side_max_combined": 0.95,
+    "safe_compounder_cross_asset_boost_cap": 0.10,
+    "safe_compounder_hard_floor_pct": 0.30,
+    "safe_compounder_max_single_trade_pct": 0.08,
+    "safe_compounder_max_positions": 3,
+
+    # Sports Daily strategy
+    "sports_daily_tags": ["sports"],
+    "sports_daily_min_volume": 5000.0,
+    "sports_daily_min_liquidity": 1000.0,
+    "sports_daily_min_spread": 0.04,
+    "sports_daily_max_hours_to_resolution": 24,
+    "sports_daily_favorite_min_prob": 0.82,
+    "sports_daily_favorite_max_prob": 0.95,
+    "sports_daily_imbalance_threshold": 0.30,
+    "sports_daily_maker_cushion": 0.02,
+    "sports_daily_min_edge": 0.02,
+    "sports_daily_max_positions": 5,
+    "sports_daily_max_single_trade_pct": 0.05,
+
+    # LLM Crypto strategy
+    "llm_enabled": False,
+    "llm_api_key": "",
+    "llm_base_url": "http://100.96.38.49:11434",
+    "llm_model": "qwen3.5:27b",
+    "llm_batch_size": 5,
+    "llm_min_edge": 0.05,
+    "llm_cache_ttl": 600,
+    "llm_daily_cache_ttl": 1800,
+    "llm_run_every_n_cycles": 2,
+    "llm_max_tokens": 4096,
+    "llm_timeout": 300,
+    "llm_context_size": 32768,
+    "llm_maker_edge_cushion": 0.05,
+    "llm_intervals": ["1h", "4h"],
+    "llm_daily_lookahead_days": 5,
 }

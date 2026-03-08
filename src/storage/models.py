@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS positions (
     token_id TEXT NOT NULL,
     outcome TEXT NOT NULL,
     market_question TEXT,
+    strategy TEXT NOT NULL DEFAULT 'unknown',
     entry_price REAL NOT NULL,
     size REAL NOT NULL,
     cost REAL NOT NULL,
@@ -49,6 +50,29 @@ CREATE TABLE IF NOT EXISTS daily_snapshots (
     losses INTEGER NOT NULL DEFAULT 0,
     daily_return_pct REAL,
     aggression_level TEXT
+);
+
+CREATE TABLE IF NOT EXISTS predictions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    est_prob REAL NOT NULL,
+    bid_price REAL,
+    delta_pct REAL,
+    window_progress REAL,
+    momentum REAL,
+    dynamic_vol REAL,
+    resolution_ts REAL,
+    traded INTEGER NOT NULL DEFAULT 0,
+    trade_id INTEGER,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    actual_correct INTEGER,
+    pnl REAL
 );
 
 CREATE TABLE IF NOT EXISTS bot_state (

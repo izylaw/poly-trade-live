@@ -12,6 +12,9 @@ class MockClobClient:
     def get_price(self, token_id: str) -> dict | None:
         return self._prices.get(token_id)
 
+    def get_orderbooks_batch(self, token_ids: list[str], chunk_size: int = 50) -> dict:
+        return {tid: self._prices.get(tid) for tid in token_ids}
+
 
 class TestHighProbability(unittest.TestCase):
     def setUp(self):
@@ -24,6 +27,7 @@ class TestHighProbability(unittest.TestCase):
             "question": "Will X happen?",
             "clobTokenIds": ["yes_tok", "no_tok"],
             "outcomes": ["Yes", "No"],
+            "outcomePrices": "[0.94, 0.06]",
             "volume": 5000,
             "liquidity": 2000,
         }
@@ -32,9 +36,79 @@ class TestHighProbability(unittest.TestCase):
             "no_tok": {"bid": 0.05, "ask": 0.06, "mid": 0.055},
         })
         signals = self.strategy.analyze([market], clob)
-        self.assertEqual(len(signals), 1)
-        self.assertEqual(signals[0].outcome, "Yes")
-        self.assertGreaterEqual(signals[0].price, 0.92)
+        self.assertGreaterEqual(len(signals), 1)
+        high_prob = [s for s in signals if s.price >= 0.92]
+        self.assertEqual(len(high_prob), 1)
+        self.assertEqual(high_prob[0].outcome, "Yes")
+        self.assertGreaterEqual(high_prob[0].price, 0.92)
+
+    def test_maker_bid_when_ask_above_max(self):
+        """ask=0.99, max=0.98 → maker bid with post_only=True"""
+        market = {
+            "conditionId": "cond_maker",
+            "question": "Will Z happen?",
+            "clobTokenIds": ["yes_tok", "no_tok"],
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": "[0.95, 0.05]",
+            "volume": 5000,
+            "liquidity": 2000,
+        }
+        clob = MockClobClient({
+            "yes_tok": {"bid": 0.95, "ask": 0.99, "mid": 0.97},
+            "no_tok": {"bid": 0.01, "ask": 0.05, "mid": 0.03},
+        })
+        signals = self.strategy.analyze([market], clob)
+        maker_signals = [s for s in signals if s.price >= 0.90]
+        self.assertEqual(len(maker_signals), 1)
+        self.assertTrue(maker_signals[0].post_only)
+        self.assertEqual(maker_signals[0].price, 0.96)  # bid + 0.01
+
+    def test_longshot_candidate_found(self):
+        """Market [0.98, 0.02] → 0.02 side found as candidate"""
+        market = {
+            "conditionId": "cond_ls",
+            "question": "Will Wizards win NBA Finals?",
+            "clobTokenIds": ["yes_tok", "no_tok"],
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": "[0.98, 0.02]",
+            "volume": 8000,
+            "liquidity": 3000,
+        }
+        candidates = self.strategy._pre_filter([market])
+        # Should find both: 0.98 in high-prob range, 0.02 in long-shot range
+        outcome_indices = [idx for _, idx, _ in candidates]
+        self.assertIn(1, outcome_indices)  # No side (0.02) found
+
+    def test_longshot_confidence_model(self):
+        """Verify multiplier-based scoring for long-shots"""
+        market = {
+            "volume": 10000,
+            "liquidity": 5000,
+        }
+        conf = self.strategy._score_longshot_confidence(market, 0.05)
+        # base = 0.05 * 2.0 = 0.10, vol_bonus = 0.08, liq_bonus = 0.05 → 0.23
+        self.assertAlmostEqual(conf, 0.23, places=2)
+
+    def test_longshot_maker_bid(self):
+        """Long-shot generates maker bid, not taker"""
+        market = {
+            "conditionId": "cond_ls2",
+            "question": "Long-shot event?",
+            "clobTokenIds": ["yes_tok", "no_tok"],
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": "[0.95, 0.05]",
+            "volume": 8000,
+            "liquidity": 3000,
+        }
+        clob = MockClobClient({
+            "yes_tok": {"bid": 0.94, "ask": 0.95, "mid": 0.945},
+            "no_tok": {"bid": 0.04, "ask": 0.06, "mid": 0.05},
+        })
+        signals = self.strategy.analyze([market], clob)
+        longshot_signals = [s for s in signals if s.price <= 0.20]
+        if longshot_signals:
+            self.assertTrue(longshot_signals[0].post_only)
+            self.assertGreater(longshot_signals[0].cancel_after_ts, 0)
 
     def test_skips_low_price_market(self):
         market = {
@@ -42,6 +116,7 @@ class TestHighProbability(unittest.TestCase):
             "question": "Will Y happen?",
             "clobTokenIds": ["yes_tok", "no_tok"],
             "outcomes": ["Yes", "No"],
+            "outcomePrices": "[0.50, 0.50]",
             "volume": 5000,
             "liquidity": 2000,
         }

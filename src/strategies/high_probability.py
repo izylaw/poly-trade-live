@@ -1,9 +1,30 @@
+import json
 import logging
+import time
 from src.strategies.base import Strategy
 from src.risk.risk_manager import TradeSignal
 from src.config.settings import Settings
 
 logger = logging.getLogger("poly-trade")
+
+
+def _parse_outcome_prices(market: dict) -> list[float]:
+    """Extract outcome prices from Gamma market data."""
+    raw = market.get("outcomePrices", "[]")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    if isinstance(raw, list):
+        prices = []
+        for p in raw:
+            try:
+                prices.append(float(p))
+            except (ValueError, TypeError):
+                prices.append(0.0)
+        return prices
+    return []
 
 
 class HighProbabilityStrategy(Strategy):
@@ -13,53 +34,183 @@ class HighProbabilityStrategy(Strategy):
         super().__init__(settings)
         self.min_price = settings.high_prob_min_price
         self.max_price = settings.high_prob_max_price
+        self.longshot_threshold = settings.high_prob_longshot_threshold
+        self.longshot_min_price = settings.high_prob_longshot_min_price
+        self.longshot_conf_multiplier = settings.high_prob_longshot_conf_multiplier
+        self.maker_ttl_hours = settings.high_prob_maker_ttl_hours
 
     def analyze(self, markets: list[dict], clob_client) -> list[TradeSignal]:
-        signals = []
-        for market in markets:
-            signal = self._evaluate_market(market, clob_client)
+        # Pre-filter using Gamma price data to avoid hitting CLOB for every market
+        candidates = self._pre_filter(markets)
+        logger.info(f"high_probability: {len(candidates)} candidates from {len(markets)} markets")
+
+        # Phase 1: Score using Gamma prices (fast, no CLOB calls)
+        gamma_signals = []
+        for market, idx, gamma_price in candidates:
+            signal = self._evaluate_from_gamma(market, idx, gamma_price)
             if signal:
-                signals.append(signal)
+                gamma_signals.append(signal)
 
-        signals.sort(key=lambda s: s.expected_value, reverse=True)
-        return signals
+        if not gamma_signals:
+            logger.info(f"high_probability: 0 gamma-scored signals from {len(candidates)} candidates")
+            return []
 
-    def _evaluate_market(self, market: dict, clob_client) -> TradeSignal | None:
-        tokens = market.get("clobTokenIds") or []
-        outcomes = market.get("outcomes") or ["Yes", "No"]
+        # Phase 2: Verify only the top candidates with actual CLOB orderbooks
+        gamma_signals.sort(key=lambda s: s.expected_value, reverse=True)
+        top = gamma_signals[:20]
 
-        if len(tokens) < 2:
-            return None
+        token_ids = [s.token_id for s in top]
+        price_map = clob_client.get_orderbooks_batch(token_ids) if token_ids else {}
 
-        # Check each outcome for high probability
-        for i, token_id in enumerate(tokens):
-            outcome_name = outcomes[i] if i < len(outcomes) else f"Outcome_{i}"
-            price_data = clob_client.get_price(token_id)
+        cancel_ts = time.time() + self.maker_ttl_hours * 3600
+
+        verified = []
+        clob_miss = 0
+        clob_out_of_range = 0
+        for signal in top:
+            price_data = price_map.get(signal.token_id)
             if price_data is None:
+                clob_miss += 1
                 continue
 
-            ask_price = price_data["ask"]
+            ask = price_data["ask"]
+            bid = price_data["bid"]
+            is_longshot = signal.price <= self.longshot_threshold
 
-            # We want to BUY outcomes priced between min_price and max_price
-            # These are near-certain outcomes with small but reliable profit
-            if self.min_price <= ask_price <= self.max_price:
-                confidence = self._score_confidence(market, ask_price)
-                profit_margin = 1.0 - ask_price
-                expected_value = confidence * profit_margin
+            if is_longshot:
+                # Long-shots: always maker bids, never taker (spread is proportionally too big)
+                maker_price = round(bid + 0.01, 2) if bid > 0 else signal.price
+                if maker_price < self.longshot_min_price:
+                    maker_price = self.longshot_min_price
+                if maker_price > self.longshot_threshold:
+                    clob_out_of_range += 1
+                    continue
+                confidence = self._score_confidence_with_liquidity(signal, price_data)
+                ev = confidence * (1.0 - maker_price)
+                verified.append(TradeSignal(
+                    market_id=signal.market_id,
+                    token_id=signal.token_id,
+                    market_question=signal.market_question,
+                    side="BUY",
+                    outcome=signal.outcome,
+                    price=maker_price,
+                    confidence=confidence,
+                    strategy=self.name,
+                    expected_value=ev,
+                    order_type="GTC",
+                    post_only=True,
+                    cancel_after_ts=cancel_ts,
+                ))
+            elif self.min_price <= ask <= self.max_price:
+                # Taker: buy at the ask
+                confidence = self._score_confidence_with_liquidity(signal, price_data)
+                ev = confidence * (1.0 - ask)
+                verified.append(TradeSignal(
+                    market_id=signal.market_id,
+                    token_id=signal.token_id,
+                    market_question=signal.market_question,
+                    side="BUY",
+                    outcome=signal.outcome,
+                    price=ask,
+                    confidence=confidence,
+                    strategy=self.name,
+                    expected_value=ev,
+                    order_type="GTC",
+                ))
+            elif ask > self.max_price and self.min_price <= bid + 0.01 <= self.max_price:
+                # Ask above max (including no asks at 1.0) — place maker bid just above best bid
+                maker_price = round(bid + 0.01, 2)
+                confidence = self._score_confidence_with_liquidity(signal, price_data)
+                ev = confidence * (1.0 - maker_price)
+                verified.append(TradeSignal(
+                    market_id=signal.market_id,
+                    token_id=signal.token_id,
+                    market_question=signal.market_question,
+                    side="BUY",
+                    outcome=signal.outcome,
+                    price=maker_price,
+                    confidence=confidence,
+                    strategy=self.name,
+                    expected_value=ev,
+                    order_type="GTC",
+                    post_only=True,
+                    cancel_after_ts=cancel_ts,
+                ))
+            else:
+                clob_out_of_range += 1
 
-                if expected_value > 0:
-                    return TradeSignal(
-                        market_id=market.get("conditionId", market.get("condition_id", "")),
-                        token_id=token_id,
-                        market_question=market.get("question", "Unknown"),
-                        side="BUY",
-                        outcome=outcome_name,
-                        price=ask_price,
-                        confidence=confidence,
-                        strategy=self.name,
-                        expected_value=expected_value,
-                        order_type="GTC",
-                    )
+        logger.info(
+            f"high_probability: {len(gamma_signals)} gamma signals -> "
+            f"top {len(top)} checked -> {len(verified)} verified "
+            f"(miss={clob_miss}, out_of_range={clob_out_of_range})"
+        )
+        return verified
+
+    def _pre_filter(self, markets: list[dict]) -> list[tuple[dict, int, float]]:
+        """Use Gamma outcomePrices to find markets likely in our price range.
+
+        Returns list of (market, outcome_index, gamma_price) tuples.
+        """
+        candidates = []
+        # Widen the filter slightly vs our actual range to account for
+        # Gamma prices being slightly stale vs live CLOB orderbook
+        margin = 0.03
+        low = self.min_price - margin
+        high = self.max_price + margin
+
+        for market in markets:
+            tokens = market.get("clobTokenIds") or []
+            if len(tokens) < 2:
+                continue
+
+            outcome_prices = _parse_outcome_prices(market)
+            if not outcome_prices:
+                continue
+
+            for i, price in enumerate(outcome_prices):
+                if i >= len(tokens):
+                    continue
+                if low <= price <= high:
+                    candidates.append((market, i, price))
+                elif self.longshot_min_price <= price <= self.longshot_threshold:
+                    candidates.append((market, i, price))
+
+        return candidates
+
+    def _evaluate_from_gamma(self, market: dict, idx: int, gamma_price: float) -> TradeSignal | None:
+        """Score a candidate using Gamma mid-market price (no CLOB call)."""
+        tokens = market.get("clobTokenIds") or []
+        outcomes = market.get("outcomes") or ["Yes", "No"]
+        token_id = tokens[idx]
+        outcome_name = outcomes[idx] if idx < len(outcomes) else f"Outcome_{idx}"
+
+        is_longshot = gamma_price <= self.longshot_threshold
+
+        if is_longshot:
+            if not (self.longshot_min_price <= gamma_price <= self.longshot_threshold):
+                return None
+            confidence = self._score_longshot_confidence(market, gamma_price)
+        else:
+            if not (self.min_price <= gamma_price <= self.max_price):
+                return None
+            confidence = self._score_confidence(market, gamma_price)
+
+        profit_margin = 1.0 - gamma_price
+        expected_value = confidence * profit_margin
+
+        if expected_value > 0:
+            return TradeSignal(
+                market_id=market.get("conditionId", market.get("condition_id", "")),
+                token_id=token_id,
+                market_question=market.get("question", "Unknown"),
+                side="BUY",
+                outcome=outcome_name,
+                price=gamma_price,
+                confidence=confidence,
+                strategy=self.name,
+                expected_value=expected_value,
+                order_type="GTC",
+            )
         return None
 
     def _score_confidence(self, market: dict, price: float) -> float:
@@ -76,3 +227,36 @@ class HighProbabilityStrategy(Strategy):
 
         confidence = min(price_score + volume_score + liq_score, 0.99)
         return round(confidence, 4)
+
+    def _score_longshot_confidence(self, market: dict, price: float) -> float:
+        """Confidence model for long-shot outcomes (price 0.02-0.20)."""
+        base = price * self.longshot_conf_multiplier  # e.g., 0.05 * 2.0 = 0.10
+
+        # Volume bonus (up to 0.08)
+        volume = float(market.get("volume", 0) or 0)
+        volume_bonus = min(volume / 10000, 1.0) * 0.08
+
+        # Liquidity bonus (up to 0.05)
+        liquidity = float(market.get("liquidity", 0) or 0)
+        liq_bonus = min(liquidity / 5000, 1.0) * 0.05
+
+        confidence = min(base + volume_bonus + liq_bonus, 0.40)
+        return round(confidence, 4)
+
+    def _score_confidence_with_liquidity(self, gamma_signal: TradeSignal, price_data: dict) -> float:
+        """Refine confidence using CLOB bid-ask spread as liquidity signal."""
+        base = gamma_signal.confidence
+        bid = price_data["bid"]
+        ask = price_data["ask"]
+        spread = ask - bid if ask < 1.0 else 0.10  # assume wide spread if no asks
+
+        is_longshot = gamma_signal.price <= self.longshot_threshold
+        if is_longshot:
+            # Scale spread adjustment for long-shots to avoid huge relative swings
+            # A 0.03 spread on a 0.05 price is normal, not alarming
+            spread_adj = max(-0.01, min(0.01, 0.01 - spread * 0.5))
+        else:
+            # Tight spread = more confidence, wide spread = less
+            spread_adj = max(-0.03, min(0.02, 0.02 - spread))
+
+        return round(min(base + spread_adj, 0.99), 4)

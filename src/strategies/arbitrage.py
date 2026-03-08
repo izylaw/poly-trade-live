@@ -14,23 +14,40 @@ class ArbitrageStrategy(Strategy):
         self.min_spread = settings.arb_min_spread
 
     def analyze(self, markets: list[dict], clob_client) -> list[TradeSignal]:
-        signals = []
+        # Pre-filter to valid 2-outcome markets
+        valid_markets = []
+        all_token_ids = []
         for market in markets:
-            arb_signals = self._check_arbitrage(market, clob_client)
+            tokens = market.get("clobTokenIds") or []
+            if len(tokens) != 2:
+                continue
+            valid_markets.append(market)
+            all_token_ids.extend(tokens[:2])
+
+        if not valid_markets:
+            return []
+
+        # Batch-fetch all orderbooks in one call (instead of 2N sequential calls)
+        price_map = clob_client.get_orderbooks_batch(all_token_ids) if all_token_ids else {}
+        logger.info(f"arbitrage: checking {len(valid_markets)} markets (batch-fetched {len(price_map)} books)")
+
+        signals = []
+        for market in valid_markets:
+            arb_signals = self._check_arbitrage(market, price_map)
             signals.extend(arb_signals)
 
         signals.sort(key=lambda s: s.expected_value, reverse=True)
         return signals
 
-    def _check_arbitrage(self, market: dict, clob_client) -> list[TradeSignal]:
+    def _check_arbitrage(self, market: dict, price_map: dict) -> list[TradeSignal]:
         tokens = market.get("clobTokenIds") or []
         outcomes = market.get("outcomes") or ["Yes", "No"]
 
         if len(tokens) != 2:
             return []
 
-        price_yes = clob_client.get_price(tokens[0])
-        price_no = clob_client.get_price(tokens[1])
+        price_yes = price_map.get(tokens[0])
+        price_no = price_map.get(tokens[1])
         if price_yes is None or price_no is None:
             return []
 

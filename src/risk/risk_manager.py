@@ -19,6 +19,8 @@ class TradeSignal:
     strategy: str
     expected_value: float = 0.0
     order_type: str = "GTC"
+    post_only: bool = False
+    cancel_after_ts: float = 0.0
 
 
 @dataclass
@@ -30,12 +32,26 @@ class ApprovedTrade:
 
 
 class RiskManager:
+    STRATEGY_MIN_CONFIDENCE = {
+        "btc_updown": 0.55,
+        "safe_compounder": 0.78,
+        "sports_daily": 0.55,
+        "high_probability": 0.06,
+        "llm_crypto": 0.55,
+    }
+
     def __init__(self, settings: Settings, circuit_breaker: CircuitBreaker):
         self.settings = settings
         self.cb = circuit_breaker
         # Overridable by aggression tuner
         self.max_single_trade_pct = settings.max_single_trade_pct
         self.min_confidence = 0.70
+
+    def _get_min_confidence(self, strategy: str) -> float:
+        override = self.STRATEGY_MIN_CONFIDENCE.get(strategy)
+        if override is not None:
+            return override
+        return self.min_confidence
 
     def evaluate(self, signal: TradeSignal, balance: float,
                  open_positions: list[dict], portfolio_exposure: float) -> ApprovedTrade | None:
@@ -51,13 +67,32 @@ class RiskManager:
             return None
 
         # Confidence check
-        if signal.confidence < self.min_confidence:
+        if signal.confidence < self._get_min_confidence(signal.strategy):
             logger.debug(f"Signal confidence {signal.confidence:.2f} below min {self.min_confidence:.2f}")
             return None
 
-        # Max open positions
+        # Max open positions (global cap)
         if len(open_positions) >= self.settings.max_open_positions:
             logger.debug(f"Max open positions ({self.settings.max_open_positions}) reached")
+            return None
+
+        # Per-strategy bucket limits
+        if signal.strategy == "high_probability":
+            hp_positions = [p for p in open_positions if p.get("strategy") == "high_probability"]
+            if len(hp_positions) >= self.settings.max_high_prob_positions:
+                logger.debug(f"high_probability position limit ({self.settings.max_high_prob_positions}) reached")
+                return None
+        else:
+            other_positions = [p for p in open_positions if p.get("strategy") != "high_probability"]
+            if len(other_positions) >= self.settings.max_other_positions:
+                logger.debug(f"Other strategies position limit ({self.settings.max_other_positions}) reached")
+                return None
+
+        # Per-market concentration check (safety net)
+        market_positions = [p for p in open_positions if p.get("market_id") == signal.market_id]
+        max_for_market = 2 if signal.strategy == "arbitrage" else self.settings.max_positions_per_market
+        if len(market_positions) >= max_for_market:
+            logger.debug(f"Already have {len(market_positions)} position(s) on market {signal.market_id[:12]}")
             return None
 
         # Portfolio exposure check

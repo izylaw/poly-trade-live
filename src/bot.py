@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from src.config.settings import Settings
 from src.utils.logger import setup_logger
 from src.storage.db import init_db
@@ -20,6 +21,9 @@ from src.core.order_manager import OrderManager
 from src.core.engine import TradingEngine
 from src.strategies.high_probability import HighProbabilityStrategy
 from src.strategies.arbitrage import ArbitrageStrategy
+from src.strategies.btc_updown import BtcUpdownStrategy
+from src.strategies.safe_compounder import SafeCompounderStrategy
+from src.strategies.sports_daily import SportsDailyStrategy
 
 logger = logging.getLogger("poly-trade")
 
@@ -43,7 +47,7 @@ class Bot:
         gamma = GammaClient()
         clob = PolymarketClobClient(s)
         market_filter = MarketFilter(s)
-        scanner = MarketScanner(s, gamma, market_filter)
+        scanner = MarketScanner(s, gamma, market_filter, clob_client=clob)
 
         # Risk
         circuit_breaker = CircuitBreaker(
@@ -53,24 +57,46 @@ class Bot:
         risk_manager = RiskManager(s, circuit_breaker)
 
         # Execution
-        paper = PaperExecutor(s.starting_capital, trade_log) if s.paper_trading else None
-        live = LiveExecutor(clob, trade_log) if not s.paper_trading else None
+        paper = PaperExecutor(s.starting_capital, trade_log, s.max_open_positions) if s.paper_trading else None
+        live = LiveExecutor(clob, trade_log, s.max_open_positions) if not s.paper_trading else None
         executor = Executor(s, paper=paper, live=live)
 
         # Strategies
         strategies = [
             HighProbabilityStrategy(s),
             ArbitrageStrategy(s),
+            BtcUpdownStrategy(s),
+            SafeCompounderStrategy(s),
+            SportsDailyStrategy(s),
         ]
 
-        # Adaptive
-        goal_tracker = GoalTracker(s.starting_capital, s.target_balance, s.target_days)
+        if s.llm_enabled:
+            from src.strategies.llm_crypto import LLMCryptoStrategy
+            strategies.append(LLMCryptoStrategy(s))
+            logger.info("LLM Crypto strategy enabled")
+
+        # Adaptive — resolve goal start date with priority chain:
+        # 1. .env GOAL_START_DATE  2. SQLite bot_state  3. datetime.now(UTC)
+        if s.goal_start_date:
+            start_date = datetime.fromisoformat(s.goal_start_date)
+            logger.info(f"Goal start date from .env: {start_date.isoformat()}")
+        else:
+            stored = trade_log.get_state("goal_start_date")
+            if stored:
+                start_date = datetime.fromisoformat(stored)
+                logger.info(f"Goal start date from DB: {start_date.isoformat()}")
+            else:
+                start_date = datetime.now(timezone.utc)
+                trade_log.set_state("goal_start_date", start_date.isoformat())
+                logger.info(f"Goal start date initialized: {start_date.isoformat()}")
+
+        goal_tracker = GoalTracker(s.starting_capital, s.target_balance, s.target_days, start_date=start_date)
         aggression_tuner = AggressionTuner(goal_tracker, risk_manager, s.starting_capital)
 
         # Core
         balance_mgr = BalanceManager(s)
         position_tracker = PositionTracker(trade_log)
-        order_manager = OrderManager(trade_log)
+        order_manager = OrderManager(trade_log, s.max_open_positions)
 
         self.engine = TradingEngine(
             settings=s,

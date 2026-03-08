@@ -1,12 +1,17 @@
 import logging
+import random
+import time
 from src.storage.trade_log import TradeLog
 
 logger = logging.getLogger("poly-trade")
 
+PAPER_BASE_FILL_RATE = 0.35  # 35% chance per cycle (was 15% — too low for short windows)
+
 
 class OrderManager:
-    def __init__(self, trade_log: TradeLog):
+    def __init__(self, trade_log: TradeLog, max_open_positions: int = 10):
         self.trade_log = trade_log
+        self.max_open_positions = max_open_positions
         self._pending_orders: list[dict] = []
 
     def track_order(self, order: dict):
@@ -19,6 +24,75 @@ class OrderManager:
     def get_pending_orders(self) -> list[dict]:
         return list(self._pending_orders)
 
+    def check_pending_orders(self, clob_client, executor, paper_mode: bool = False) -> list[dict]:
+        """Poll pending orders, handle fills and timeouts."""
+        filled = []
+        now = time.time()
+        to_remove = []
+
+        for order in list(self._pending_orders):
+            cancel_after = order.get("cancel_after_ts", 0)
+
+            # Auto-cancel if past deadline
+            if cancel_after and now >= cancel_after:
+                self._cancel_order(order, clob_client, paper_mode)
+                to_remove.append(order)
+                continue
+
+            if paper_mode:
+                # Probabilistic fill: base rate boosted by confidence
+                # Higher confidence = bid closer to fair value = more likely to fill
+                confidence = order.get("confidence", 0.6)
+                confidence_boost = min(confidence, 0.9)  # cap at 0.9
+                fill_prob = PAPER_BASE_FILL_RATE * (1 + confidence_boost)
+                if random.random() < fill_prob:
+                    result = executor.paper.fill_order(order)
+                    if result.get("status") == "rejected":
+                        self._cancel_order(order, clob_client, paper_mode)
+                        to_remove.append(order)
+                        continue
+                    self.trade_log.update_trade_status(order["trade_id"], "filled")
+                    to_remove.append(order)
+                    filled.append(order)
+            else:
+                # Live: poll CLOB for actual fill status
+                order_id = order.get("order_id")
+                if order_id:
+                    status = clob_client.get_order(order_id)
+                    if status and _is_filled(status):
+                        self.trade_log.update_trade_status(order["trade_id"], "filled")
+                        to_remove.append(order)
+                        filled.append(order)
+
+        for order in to_remove:
+            if order in self._pending_orders:
+                self._pending_orders.remove(order)
+
+        if not paper_mode and filled:
+            total = len(executor.get_open_positions()) + len(filled)
+            if total >= self.max_open_positions and self._pending_orders:
+                for order in list(self._pending_orders):
+                    self._cancel_order(order, clob_client, paper_mode=False)
+                self._pending_orders.clear()
+                logger.info(f"Cancelled remaining pending orders — position limit {self.max_open_positions} reached")
+
+        return filled
+
+    def _cancel_order(self, order: dict, clob_client, paper_mode: bool = False):
+        tid = order.get("trade_id")
+        if tid:
+            self.trade_log.update_trade_status(tid, "cancelled")
+
+        if not paper_mode:
+            order_id = order.get("order_id")
+            if order_id:
+                try:
+                    clob_client.cancel_order(order_id)
+                except Exception as e:
+                    logger.warning(f"Failed to cancel order {order_id}: {e}")
+
+        logger.info(f"Auto-cancelled order trade_id={tid} (deadline passed)")
+
     def cancel_all_pending(self):
         for order in self._pending_orders:
             tid = order.get("trade_id")
@@ -28,3 +102,8 @@ class OrderManager:
         self._pending_orders.clear()
         if count:
             logger.info(f"Cancelled {count} pending orders")
+
+
+def _is_filled(status: dict) -> bool:
+    s = status.get("status", "").lower()
+    return s in ("filled", "matched")

@@ -5,6 +5,7 @@ from src.config.settings import Settings
 
 class Strategy(ABC):
     name: str = "base"
+    self_discovering: bool = False  # True if strategy finds its own markets
 
     def __init__(self, settings: Settings):
         self.settings = settings
