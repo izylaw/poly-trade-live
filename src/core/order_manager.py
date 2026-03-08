@@ -9,8 +9,9 @@ PAPER_BASE_FILL_RATE = 0.35  # 35% chance per cycle (was 15% — too low for sho
 
 
 class OrderManager:
-    def __init__(self, trade_log: TradeLog):
+    def __init__(self, trade_log: TradeLog, max_open_positions: int = 10):
         self.trade_log = trade_log
+        self.max_open_positions = max_open_positions
         self._pending_orders: list[dict] = []
 
     def track_order(self, order: dict):
@@ -45,7 +46,11 @@ class OrderManager:
                 confidence_boost = min(confidence, 0.9)  # cap at 0.9
                 fill_prob = PAPER_BASE_FILL_RATE * (1 + confidence_boost)
                 if random.random() < fill_prob:
-                    executor.paper.fill_order(order)
+                    result = executor.paper.fill_order(order)
+                    if result.get("status") == "rejected":
+                        self._cancel_order(order, clob_client, paper_mode)
+                        to_remove.append(order)
+                        continue
                     self.trade_log.update_trade_status(order["trade_id"], "filled")
                     to_remove.append(order)
                     filled.append(order)
@@ -62,6 +67,14 @@ class OrderManager:
         for order in to_remove:
             if order in self._pending_orders:
                 self._pending_orders.remove(order)
+
+        if not paper_mode and filled:
+            total = len(executor.get_open_positions()) + len(filled)
+            if total >= self.max_open_positions and self._pending_orders:
+                for order in list(self._pending_orders):
+                    self._cancel_order(order, clob_client, paper_mode=False)
+                self._pending_orders.clear()
+                logger.info(f"Cancelled remaining pending orders — position limit {self.max_open_positions} reached")
 
         return filled
 

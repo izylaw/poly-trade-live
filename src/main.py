@@ -1,4 +1,5 @@
 import click
+from datetime import datetime, timezone
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -104,8 +105,19 @@ def goal():
     conn = init_db(settings.db_path)
     trade_log = TradeLog(conn)
 
+    # Resolve goal start date: 1. .env  2. SQLite  3. now(UTC)
+    if settings.goal_start_date:
+        start_date = datetime.fromisoformat(settings.goal_start_date)
+    else:
+        stored = trade_log.get_state("goal_start_date")
+        if stored:
+            start_date = datetime.fromisoformat(stored)
+        else:
+            start_date = datetime.now(timezone.utc)
+
     snapshots = trade_log.get_daily_snapshots(30)
-    tracker = GoalTracker(settings.starting_capital, settings.target_balance, settings.target_days)
+    tracker = GoalTracker(settings.starting_capital, settings.target_balance, settings.target_days,
+                          start_date=start_date)
 
     current_balance = settings.starting_capital
     for snap in reversed(snapshots):
@@ -126,6 +138,22 @@ def goal():
         f"Projected Days to Target: {status.projected_days:.0f}",
         title="Goal Progress",
     ))
+
+
+@cli.command("reset-goal")
+def reset_goal():
+    """Reset goal start date so the next run starts a fresh cycle."""
+    settings = get_settings()
+    conn = init_db(settings.db_path)
+    trade_log = TradeLog(conn)
+
+    old = trade_log.get_state("goal_start_date")
+    if old:
+        conn.execute("DELETE FROM bot_state WHERE key='goal_start_date'")
+        conn.commit()
+        console.print(f"[green]Cleared goal_start_date ({old}). Next bot run will start a new cycle.[/green]")
+    else:
+        console.print("[yellow]No goal_start_date found in DB — nothing to reset.[/yellow]")
 
 
 @cli.command()

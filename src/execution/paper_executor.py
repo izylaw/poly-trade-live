@@ -8,10 +8,16 @@ logger = logging.getLogger("poly-trade")
 
 
 class PaperExecutor:
-    def __init__(self, starting_balance: float, trade_log: TradeLog):
+    def __init__(self, starting_balance: float, trade_log: TradeLog, max_open_positions: int = 10):
         self.balance = starting_balance
         self.trade_log = trade_log
-        self.positions: list[dict] = []
+        self.max_open_positions = max_open_positions
+        # Load existing open positions from DB so dedup checks work across restarts
+        self.positions: list[dict] = trade_log.get_open_positions()
+        if self.positions:
+            open_cost = sum(p.get("cost", 0) for p in self.positions)
+            self.balance -= open_cost
+            logger.info(f"Paper: loaded {len(self.positions)} open positions (cost=${open_cost:.2f}), balance=${self.balance:.2f}")
 
     def execute(self, trade: ApprovedTrade) -> dict:
         if trade.signal.post_only:
@@ -118,6 +124,10 @@ class PaperExecutor:
 
     def fill_order(self, order: dict) -> dict:
         """Called by order_manager when probabilistic fill triggers."""
+        if len(self.get_open_positions()) >= self.max_open_positions:
+            logger.info(f"Paper: rejected fill — {self.max_open_positions} positions already open")
+            return {"status": "rejected", "reason": "max_positions_reached"}
+
         fill_price = order["fill_price"]
         actual_cost = order["size"] * fill_price
 

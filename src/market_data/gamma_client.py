@@ -1,5 +1,6 @@
 import time
 import logging
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from src.utils.retry import retry
@@ -7,6 +8,7 @@ from src.utils.retry import retry
 logger = logging.getLogger("poly-trade")
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
+ASSET_NAMES = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "xrp"}
 
 
 class GammaClient:
@@ -287,3 +289,119 @@ class GammaClient:
                     continue
 
         return {"resolved": True, "winning_outcome": winning_outcome}
+
+    def _fetch_slug_markets(self, slug: str, market_type: str, asset: str) -> list[dict]:
+        """Fetch markets for an event by slug, tagging with market type and asset."""
+        cache_key = f"slug_{slug}"
+        cached = self._get_cached(cache_key, ttl=300)
+        if cached is not None:
+            return cached
+
+        try:
+            resp = requests.get(
+                f"{GAMMA_API_URL}/events",
+                params={"slug": slug},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            events = resp.json()
+        except Exception as e:
+            logger.debug(f"Gamma slug lookup failed for {slug}: {e}")
+            return []
+
+        markets = []
+        for event in events:
+            if event.get("closed"):
+                continue
+            for m in event.get("markets", []):
+                if m.get("closed"):
+                    continue
+                m["_event_slug"] = slug
+                m["_market_type"] = market_type
+                m["_asset"] = asset
+                markets.append(m)
+
+        self._set_cache(cache_key, markets)
+        return markets
+
+    def get_crypto_daily_markets(self, assets: list[str], lookahead_days: int = 5) -> list[dict]:
+        """Fetch daily above/below, price range, and up/down markets for all assets."""
+        all_markets = []
+        today = datetime.now(timezone.utc).date()
+
+        for asset in assets:
+            coin = ASSET_NAMES.get(asset)
+            if not coin:
+                continue
+
+            for offset in range(lookahead_days):
+                day = today + timedelta(days=offset)
+                month = day.strftime("%B").lower()
+                day_num = day.day
+
+                slugs = [
+                    (f"{coin}-above-on-{month}-{day_num}", "above_below"),
+                    (f"{coin}-price-on-{month}-{day_num}", "price_range"),
+                    (f"{coin}-up-or-down-on-{month}-{day_num}", "daily_updown"),
+                ]
+
+                for slug, market_type in slugs:
+                    markets = self._fetch_slug_markets(slug, market_type, asset)
+                    all_markets.extend(markets)
+
+        if all_markets:
+            logger.info(f"Crypto daily discovery: {len(all_markets)} markets across {len(assets)} assets")
+        return all_markets
+
+    def get_crypto_weekly_markets(self) -> list[dict]:
+        """Fetch weekly Bitcoin hit-price markets."""
+        all_markets = []
+        today = datetime.now(timezone.utc).date()
+        monday = today - timedelta(days=today.weekday())
+
+        for week_offset in range(2):
+            week_monday = monday + timedelta(weeks=week_offset)
+            week_sunday = week_monday + timedelta(days=6)
+
+            month = week_monday.strftime("%B").lower()
+            start = week_monday.day
+            end = week_sunday.day
+
+            slug = f"what-price-will-bitcoin-hit-{month}-{start}-{end}"
+            markets = self._fetch_slug_markets(slug, "weekly_hit", "BTC")
+            all_markets.extend(markets)
+
+            # If week spans months, also try Sunday's month
+            if week_sunday.month != week_monday.month:
+                alt_month = week_sunday.strftime("%B").lower()
+                alt_slug = f"what-price-will-bitcoin-hit-{alt_month}-{start}-{end}"
+                alt_markets = self._fetch_slug_markets(alt_slug, "weekly_hit", "BTC")
+                all_markets.extend(alt_markets)
+
+        if all_markets:
+            logger.info(f"Crypto weekly discovery: {len(all_markets)} markets")
+        return all_markets
+
+    def get_crypto_monthly_markets(self) -> list[dict]:
+        """Fetch monthly hit-price markets for BTC, ETH, SOL."""
+        all_markets = []
+        now = datetime.now(timezone.utc)
+        coins = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana"}
+
+        for month_offset in range(2):
+            month = now.month + month_offset
+            year = now.year
+            if month > 12:
+                month -= 12
+                year += 1
+
+            month_name = datetime(year, month, 1).strftime("%B").lower()
+
+            for asset, coin in coins.items():
+                slug = f"what-price-will-{coin}-hit-in-{month_name}-{year}"
+                markets = self._fetch_slug_markets(slug, "monthly_hit", asset)
+                all_markets.extend(markets)
+
+        if all_markets:
+            logger.info(f"Crypto monthly discovery: {len(all_markets)} markets")
+        return all_markets

@@ -5,10 +5,11 @@ Adaptive Polymarket trading bot. Python, uses py-clob-client. Starts with $10 ta
 
 ## Architecture
 - `src/core/engine.py` — Main trading loop (scan -> signal -> risk -> execute -> adapt). Strategies run concurrently via ThreadPoolExecutor. Resolution checks run every 5th cycle.
-- `src/strategies/` — Strategy implementations (high_probability, arbitrage, sports_daily, btc_updown, safe_compounder)
+- `src/strategies/` — Strategy implementations (high_probability, arbitrage, sports_daily, btc_updown, safe_compounder, llm_crypto)
+- `src/llm/` — LLM client (OpenAI-compatible, Ollama) and prompt templates for llm_crypto strategy
 - `src/risk/` — Risk management (kelly sizing, circuit breakers, hard floor)
 - `src/adaptive/` — Goal tracking and aggression tuning
-- `src/market_data/` — Gamma + CLOB API wrappers, market scanning. Supports batch orderbook fetches and parallel Gamma pagination.
+- `src/market_data/` — Gamma + CLOB + Binance API wrappers, market scanning. Supports batch orderbook fetches, parallel Gamma pagination, and slug-based crypto market discovery.
 - `src/execution/` — Paper and live executors
 - `src/storage/` — SQLite persistence
 

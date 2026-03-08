@@ -5,7 +5,7 @@ from src.utils.retry import retry
 
 logger = logging.getLogger("poly-trade")
 
-BINANCE_API_URL = "https://api.binance.com"
+BINANCE_API_URL = "https://data-api.binance.vision"
 
 ASSET_SYMBOLS = {
     "BTC": "BTCUSDT",

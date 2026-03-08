@@ -1,7 +1,8 @@
 DEFAULTS = {
     "starting_capital": 10.0,
-    "target_balance": 1000.0,
-    "target_days": 60,
+    "target_balance": 20.0,
+    "target_days": 30,
+    "goal_start_date": "",  # ISO format (e.g. 2026-03-01T00:00:00+00:00), empty = auto-detect
     "paper_trading": True,
     "polygon_rpc_url": "https://polygon-rpc.com",
     "log_level": "INFO",
@@ -10,10 +11,11 @@ DEFAULTS = {
     "hard_floor_pct": 0.20,
     "max_single_trade_pct": 0.10,
     "max_portfolio_exposure_pct": 0.60,
-    "max_open_positions": 5,
+    "max_open_positions": 10,
     "daily_loss_limit_pct": 0.15,
     "min_trade_size": 0.50,
     "consecutive_loss_pause": 3,
+    "max_positions_per_market": 1,
 
     # Market filter defaults
     "min_volume_24h": 500.0,
@@ -81,4 +83,21 @@ DEFAULTS = {
     "sports_daily_min_edge": 0.02,
     "sports_daily_max_positions": 5,
     "sports_daily_max_single_trade_pct": 0.05,
+
+    # LLM Crypto strategy
+    "llm_enabled": False,
+    "llm_api_key": "",
+    "llm_base_url": "http://100.96.38.49:11434",
+    "llm_model": "qwen3.5:27b",
+    "llm_batch_size": 5,
+    "llm_min_edge": 0.05,
+    "llm_cache_ttl": 600,
+    "llm_daily_cache_ttl": 1800,
+    "llm_run_every_n_cycles": 2,
+    "llm_max_tokens": 4096,
+    "llm_timeout": 300,
+    "llm_context_size": 32768,
+    "llm_maker_edge_cushion": 0.05,
+    "llm_intervals": ["1h", "4h"],
+    "llm_daily_lookahead_days": 5,
 }

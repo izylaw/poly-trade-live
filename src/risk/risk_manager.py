@@ -37,6 +37,7 @@ class RiskManager:
         "safe_compounder": 0.78,
         "sports_daily": 0.55,
         "high_probability": 0.06,
+        "llm_crypto": 0.55,
     }
 
     def __init__(self, settings: Settings, circuit_breaker: CircuitBreaker):
@@ -73,6 +74,13 @@ class RiskManager:
         # Max open positions
         if len(open_positions) >= self.settings.max_open_positions:
             logger.debug(f"Max open positions ({self.settings.max_open_positions}) reached")
+            return None
+
+        # Per-market concentration check (safety net)
+        market_positions = [p for p in open_positions if p.get("market_id") == signal.market_id]
+        max_for_market = 2 if signal.strategy == "arbitrage" else self.settings.max_positions_per_market
+        if len(market_positions) >= max_for_market:
+            logger.debug(f"Already have {len(market_positions)} position(s) on market {signal.market_id[:12]}")
             return None
 
         # Portfolio exposure check

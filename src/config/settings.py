@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     starting_capital: float = DEFAULTS["starting_capital"]
     target_balance: float = DEFAULTS["target_balance"]
     target_days: int = DEFAULTS["target_days"]
+    goal_start_date: str = DEFAULTS["goal_start_date"]
     paper_trading: bool = DEFAULTS["paper_trading"]
     log_level: str = DEFAULTS["log_level"]
 
@@ -28,6 +29,7 @@ class Settings(BaseSettings):
     daily_loss_limit_pct: float = DEFAULTS["daily_loss_limit_pct"]
     min_trade_size: float = DEFAULTS["min_trade_size"]
     consecutive_loss_pause: int = DEFAULTS["consecutive_loss_pause"]
+    max_positions_per_market: int = DEFAULTS["max_positions_per_market"]
 
     # Market filter
     min_volume_24h: float = DEFAULTS["min_volume_24h"]
@@ -95,6 +97,23 @@ class Settings(BaseSettings):
     sports_daily_min_edge: float = DEFAULTS["sports_daily_min_edge"]
     sports_daily_max_positions: int = DEFAULTS["sports_daily_max_positions"]
     sports_daily_max_single_trade_pct: float = DEFAULTS["sports_daily_max_single_trade_pct"]
+
+    # LLM Crypto strategy
+    llm_enabled: bool = DEFAULTS["llm_enabled"]
+    llm_api_key: str = DEFAULTS["llm_api_key"]
+    llm_base_url: str = DEFAULTS["llm_base_url"]
+    llm_model: str = DEFAULTS["llm_model"]
+    llm_batch_size: int = DEFAULTS["llm_batch_size"]
+    llm_min_edge: float = DEFAULTS["llm_min_edge"]
+    llm_cache_ttl: int = DEFAULTS["llm_cache_ttl"]
+    llm_daily_cache_ttl: int = DEFAULTS["llm_daily_cache_ttl"]
+    llm_run_every_n_cycles: int = DEFAULTS["llm_run_every_n_cycles"]
+    llm_max_tokens: int = DEFAULTS["llm_max_tokens"]
+    llm_timeout: int = DEFAULTS["llm_timeout"]
+    llm_context_size: int = DEFAULTS["llm_context_size"]
+    llm_maker_edge_cushion: float = DEFAULTS["llm_maker_edge_cushion"]
+    llm_intervals: list[str] = DEFAULTS["llm_intervals"]
+    llm_daily_lookahead_days: int = DEFAULTS["llm_daily_lookahead_days"]
 
     model_config = {
         "env_file": ".env",

@@ -50,8 +50,9 @@ Each cycle runs every 30 seconds:
 2. ANALYZE (concurrent)
    All enabled strategies run in parallel via ThreadPoolExecutor:
      Strategy.analyze(markets, clob_client) -> TradeSignal[]
-   Self-discovering strategies (sports_daily, btc_updown) find their own markets.
+   Self-discovering strategies (sports_daily, btc_updown, llm_crypto) find their own markets.
    sports_daily batch-fetches orderbooks via get_books_batch() for efficiency.
+   llm_crypto runs every Nth cycle (default: 2) to limit LLM API load.
 
 3. RANK
    All signals sorted by expected_value (confidence * return)
@@ -239,6 +240,37 @@ Signal types:
   3. Favorite value — exploit favorite-longshot bias (0.82-0.95 range)
 ```
 
+### LLM Crypto (self-discovering)
+
+```
+Uses a local LLM (Ollama/Qwen 27B) to analyze crypto markets on Polymarket.
+Runs every Nth cycle (default: 2) to limit LLM load.
+
+Discovery (4 sources):
+  1. Up/Down interval markets (1h, 4h) via slug: {asset}-updown-{interval}-{unix_ts}
+  2. Daily markets via slug: {coin}-above-on-{month}-{day},
+     {coin}-price-on-{month}-{day}, {coin}-up-or-down-on-{month}-{day}
+  3. Weekly hit price via slug: what-price-will-bitcoin-hit-{month}-{start}-{end}
+  4. Monthly hit price via slug: what-price-will-{coin}-hit-in-{month}-{year}
+  Assets: BTC, ETH, SOL (tickers for updown, full names for daily/weekly/monthly)
+
+Data gathering:
+  Pre-fetches Binance data once per asset (price, ATR, momentum, klines)
+  Caps markets at batch_size * 2 to limit CLOB calls
+  Uses 1m klines for updown, 15m for daily, 1h for weekly/monthly
+
+LLM analysis:
+  Sends batches of up to 5 markets to LLM with system + user prompt
+  LLM returns JSON array of assessments with action, probability, confidence
+  Actions: BUY_UP/BUY_DOWN (updown), BUY_YES/BUY_NO (yes/no markets)
+  Confidence scaling: low=0.85, medium=0.92, high=1.0
+
+Order execution:
+  Maker GTC orders with post_only=True (zero maker fees)
+  Smart bidding: undercuts best ask when below fair bid
+  Edge guard: bid must maintain min_edge (default: 0.05)
+```
+
 ## Module Dependencies
 
 ```
@@ -250,14 +282,20 @@ utils/retry ───> clob_client, gamma_client
 storage/db ────> trade_log ──> paper_executor, live_executor,
                                position_tracker, order_manager
 
-market_data/gamma_client ──> market_scanner
-market_data/clob_client ───> strategies, live_executor
-market_data/market_filter ─> market_scanner
+market_data/gamma_client ──────> market_scanner, llm_crypto
+market_data/clob_client ───────> strategies, live_executor
+market_data/binance_client ────> btc_updown, safe_compounder, llm_crypto
+market_data/crypto_discovery ──> btc_updown, safe_compounder, llm_crypto
+market_data/market_filter ─────> market_scanner
+
+llm/client ────> llm_crypto (OpenAI-compatible API, Ollama)
+llm/prompts ───> llm_crypto
 
 risk/kelly ────────> risk_manager
 risk/circuit_breaker > risk_manager
 
-strategies/base ───> high_probability, arbitrage, sports_daily, btc_updown, safe_compounder
+strategies/base ───> high_probability, arbitrage, sports_daily,
+                     btc_updown, safe_compounder, llm_crypto
 
 adaptive/goal_tracker ───> aggression_tuner
 

@@ -1,4 +1,3 @@
-import json
 import logging
 import math
 import time
@@ -7,15 +6,9 @@ from src.risk.risk_manager import TradeSignal
 from src.config.settings import Settings
 from src.market_data.binance_client import BinanceClient
 from src.market_data.gamma_client import GammaClient
+from src.market_data.crypto_discovery import discover_crypto_markets, INTERVAL_WINDOWS
 
 logger = logging.getLogger("poly-trade")
-
-# Trade during the observation window when real price delta data exists
-INTERVAL_WINDOWS = {
-    "5m": (30, 330),    # 30s after window starts to 30s before resolution
-    "15m": (60, 870),   # 60s after start, 30s before resolution
-    "1h": (120, 3570),  # 2min after start, 30s before resolution
-}
 
 
 class BtcUpdownStrategy(Strategy):
@@ -285,81 +278,12 @@ class BtcUpdownStrategy(Strategy):
         prob = 1.0 / (1.0 + math.exp(-self.logistic_k * z))
         return _clamp(prob, 0.05, 0.95)
 
-    # --- Market discovery (kept from v1) ---
+    # --- Market discovery ---
 
     def _discover_markets(self, asset: str, interval: str) -> list[dict]:
-        from src.market_data.gamma_client import GammaClient
-        interval_secs = GammaClient.INTERVAL_SECONDS.get(interval, 300)
-
-        raw_markets = self.gamma.get_crypto_updown_markets(asset, interval)
-        if not raw_markets:
-            logger.info(f"btc_updown: {asset} {interval}: no events found on Gamma")
-            return []
-
-        now = time.time()
-        window = INTERVAL_WINDOWS.get(interval, (30, 330))
-        min_time, max_time = window
-
-        filtered = []
-        for m in raw_markets:
-            start_ts = m.get("_start_ts")
-            if start_ts is None:
-                continue
-            resolution_ts = start_ts + interval_secs
-
-            # How far into the window are we?
-            elapsed = now - start_ts
-            time_to_resolution = resolution_ts - now
-            if min_time <= elapsed and time_to_resolution >= (interval_secs - max_time):
-                # Parse JSON-encoded fields
-                m["clobTokenIds"] = self._parse_json_field(m.get("clobTokenIds", []))
-                m["outcomes"] = self._parse_json_field(m.get("outcomes", []))
-                if len(m["clobTokenIds"]) >= 2 and len(m["outcomes"]) >= 2:
-                    m["_resolution_ts"] = resolution_ts
-                    filtered.append(m)
-
-        if filtered:
-            logger.info(f"btc_updown: {asset} {interval} discovery: {len(filtered)} markets in window (of {len(raw_markets)} raw)")
-        else:
-            nearest = None
-            for m in raw_markets:
-                start_ts = m.get("_start_ts")
-                if start_ts is None:
-                    continue
-                res_ts = start_ts + interval_secs
-                if res_ts > now:
-                    diff = res_ts - now
-                    if nearest is None or diff < nearest:
-                        nearest = diff
-            if nearest is not None:
-                logger.info(
-                    f"btc_updown: {asset} {interval}: no markets in time window "
-                    f"(next resolves in {nearest / 60:.0f}m, window is {min_time}s-{max_time}s)"
-                )
-            else:
-                logger.info(f"btc_updown: {asset} {interval}: no markets in time window (of {len(raw_markets)} raw)")
-        return filtered
-
-    @staticmethod
-    def _parse_json_field(value):
-        if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except (json.JSONDecodeError, TypeError):
-                return []
-        return value if isinstance(value, list) else []
-
-    @staticmethod
-    def _parse_resolution_ts(slug: str) -> float | None:
-        if not slug:
-            return None
-        parts = slug.rsplit("-", 1)
-        if len(parts) < 2:
-            return None
-        try:
-            return float(parts[-1])
-        except ValueError:
-            return None
+        return discover_crypto_markets(
+            self.gamma, asset, interval, strategy_name=self.name,
+        )
 
     # --- Binance data helpers (kept from v1) ---
 

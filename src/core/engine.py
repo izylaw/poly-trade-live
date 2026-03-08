@@ -1,6 +1,7 @@
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 from datetime import datetime, timezone
 from src.config.settings import Settings
 from src.market_data.market_scanner import MarketScanner
@@ -176,13 +177,26 @@ class TradingEngine:
         open_positions = self.executor.get_open_positions()
         exposure = self.balance_mgr.portfolio_exposure(open_positions)
 
+        # Build per-market position count (open positions + pending orders)
+        market_pos_count = Counter(p["market_id"] for p in open_positions if p.get("market_id"))
+        for o in self.order_manager.get_pending_orders():
+            if o.get("market_id"):
+                market_pos_count[o["market_id"]] += 1
+
         for signal in all_signals:
+            # Duplicate market check
+            max_for_market = 2 if signal.strategy == "arbitrage" else self.settings.max_positions_per_market
+            if market_pos_count.get(signal.market_id, 0) >= max_for_market:
+                logger.debug(f"SKIP duplicate market: {signal.market_question[:50]}")
+                continue
+
             approved = self.risk_manager.evaluate(signal, balance, open_positions, exposure)
             if approved is None:
                 continue
 
             result = self.executor.execute(approved)
             if result.get("status") in ("filled", "pending"):
+                market_pos_count[signal.market_id] += 1
                 if result.get("status") == "pending":
                     self.order_manager.track_order(result)
                 # Update running state

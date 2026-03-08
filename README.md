@@ -21,6 +21,12 @@ The bot runs a 30-second trading loop:
 
 **Sports Daily** — Trades daily sports events using market microstructure signals: spread capture (maker bids in wide spreads), book imbalance (follow informed flow), and favorite value (exploit favorite-longshot bias). Self-discovering — finds markets via Gamma tag search with parallel pagination. Uses batch orderbook fetches for efficiency.
 
+**BTC Up/Down** — Trades crypto up/down interval markets (5m, 15m) using a price delta probability model. Captures reference price at window start, converts delta to directional probability via logistic function with momentum confirmation. Maker GTC orders with book-aware bidding.
+
+**Safe Compounder** — Conservative crypto interval strategy targeting high-confidence setups across BTC, ETH, SOL. Dual-side evaluation with cross-asset confirmation boost. Stricter risk limits (30% hard floor, 8% max trade, 3 max positions).
+
+**LLM Crypto** — Uses a local LLM (Ollama/Qwen 27B) to analyze all crypto market types on Polymarket: up/down (1h/4h intervals), above/below, price range, daily up/down, weekly hit price, and monthly hit price. Sends Binance price data + Polymarket orderbook data to the LLM in batches. Self-discovering via slug-based market lookup. Runs every other cycle to manage LLM latency.
+
 ## Risk Management
 
 Every trade must pass all checks:
@@ -140,7 +146,11 @@ src/
 │   ├── arbitrage.py         # YES+NO spread detection
 │   ├── sports_daily.py      # Sports microstructure (spread, imbalance, favorite)
 │   ├── btc_updown.py        # BTC up/down interval trading
-│   └── safe_compounder.py   # Safe compounding strategy
+│   ├── safe_compounder.py   # Safe compounding strategy
+│   └── llm_crypto.py        # LLM-powered all-market crypto analysis
+├── llm/
+│   ├── client.py            # OpenAI-compatible LLM client (Ollama)
+│   └── prompts.py           # System + user prompt templates
 ├── risk/
 │   ├── risk_manager.py      # Gates every trade
 │   ├── kelly.py             # Half-Kelly position sizing
@@ -149,8 +159,10 @@ src/
 │   ├── goal_tracker.py      # $10→$1000 progress tracking
 │   └── aggression_tuner.py  # Adjusts risk params dynamically
 ├── market_data/
-│   ├── gamma_client.py      # Gamma API (markets, events)
+│   ├── gamma_client.py      # Gamma API (markets, events, slug discovery)
 │   ├── clob_client.py       # CLOB API wrapper (orders, book)
+│   ├── binance_client.py    # Binance API (price, klines, ATR, depth)
+│   ├── crypto_discovery.py  # Shared crypto market discovery + time windows
 │   ├── market_scanner.py    # Scans for opportunities
 │   └── market_filter.py     # Volume, liquidity, spread filters
 ├── execution/
@@ -172,4 +184,4 @@ src/
 python -m pytest tests/ -v
 ```
 
-Covers: Kelly sizing, risk manager gates, strategy signal generation, goal tracking, aggression tuning, sports daily discovery/signals, and market scanner pipeline.
+Covers: Kelly sizing, risk manager gates, strategy signal generation, goal tracking, aggression tuning, sports daily discovery/signals, market scanner pipeline, LLM crypto market discovery/actions, and deduplication.
