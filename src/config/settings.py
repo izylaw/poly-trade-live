@@ -26,8 +26,6 @@ class Settings(BaseSettings):
     max_single_trade_pct: float = DEFAULTS["max_single_trade_pct"]
     max_portfolio_exposure_pct: float = DEFAULTS["max_portfolio_exposure_pct"]
     max_open_positions: int = DEFAULTS["max_open_positions"]
-    max_high_prob_positions: int = DEFAULTS["max_high_prob_positions"]
-    max_other_positions: int = DEFAULTS["max_other_positions"]
     daily_loss_limit_pct: float = DEFAULTS["daily_loss_limit_pct"]
     min_trade_size: float = DEFAULTS["min_trade_size"]
     consecutive_loss_pause: int = DEFAULTS["consecutive_loss_pause"]
@@ -129,6 +127,9 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> Path:
+        if self.only_strategies:
+            suffix = "_".join(sorted(self.only_strategies))
+            return Path(f"data/poly_trade_{suffix}.db")
         return Path("data/poly_trade.db")
 
     @property

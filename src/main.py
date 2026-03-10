@@ -51,7 +51,7 @@ def status():
     conn = init_db(settings.db_path)
     trade_log = TradeLog(conn)
 
-    positions = trade_log.get_open_positions()
+    positions = trade_log.get_open_positions(paper_trade=settings.paper_trading)
     recent = trade_log.get_recent_trades(10)
 
     table = Table(title="Open Positions")
@@ -386,6 +386,58 @@ def xray(top):
 
     rec_panel = "\n".join(f"  {i+1}. {r}" for i, r in enumerate(recs))
     console.print(Panel(rec_panel, title="Recommendations", border_style="green"))
+
+
+@cli.command()
+def dbs():
+    """List all strategy databases."""
+    from pathlib import Path
+    import sqlite3, os
+
+    data_dir = Path("data")
+    db_files = sorted(data_dir.glob("poly_trade*.db"))
+
+    if not db_files:
+        console.print("[yellow]No databases found in data/[/yellow]")
+        return
+
+    table = Table(title="Strategy Databases")
+    table.add_column("Database")
+    table.add_column("Strategies")
+    table.add_column("Positions", justify="right")
+    table.add_column("Trades", justify="right")
+    table.add_column("Size", justify="right")
+
+    for db_path in db_files:
+        size_kb = os.path.getsize(db_path) / 1024
+        # Derive strategies from filename
+        stem = db_path.stem  # e.g. poly_trade_btc_updown or poly_trade
+        if stem == "poly_trade":
+            strats = "all (default)"
+        else:
+            strats = stem.removeprefix("poly_trade_").replace("_", ", ", stem.count("_") - 1)
+            # Re-derive properly: filename is poly_trade_{sorted strategies joined by _}
+            # Strategy names themselves contain underscores, so just show raw suffix
+            strats = stem.removeprefix("poly_trade_")
+
+        try:
+            conn = sqlite3.connect(str(db_path))
+            positions = conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'").fetchone()[0]
+            trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+            conn.close()
+        except Exception:
+            positions = "?"
+            trades = "?"
+
+        table.add_row(
+            db_path.name,
+            strats,
+            str(positions),
+            str(trades),
+            f"{size_kb:.0f} KB",
+        )
+
+    console.print(table)
 
 
 @cli.command()

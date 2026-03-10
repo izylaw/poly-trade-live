@@ -76,18 +76,6 @@ class RiskManager:
             logger.debug(f"Max open positions ({self.settings.max_open_positions}) reached")
             return None
 
-        # Per-strategy bucket limits
-        if signal.strategy == "high_probability":
-            hp_positions = [p for p in open_positions if p.get("strategy") == "high_probability"]
-            if len(hp_positions) >= self.settings.max_high_prob_positions:
-                logger.debug(f"high_probability position limit ({self.settings.max_high_prob_positions}) reached")
-                return None
-        else:
-            other_positions = [p for p in open_positions if p.get("strategy") != "high_probability"]
-            if len(other_positions) >= self.settings.max_other_positions:
-                logger.debug(f"Other strategies position limit ({self.settings.max_other_positions}) reached")
-                return None
-
         # Per-market concentration check (safety net)
         market_positions = [p for p in open_positions if p.get("market_id") == signal.market_id]
         max_for_market = 2 if signal.strategy == "arbitrage" else self.settings.max_positions_per_market

@@ -52,8 +52,8 @@ class TradeLog:
         cur = self.conn.execute(
             """INSERT INTO positions
                (market_id, token_id, outcome, market_question, strategy,
-                entry_price, size, cost, current_price, status, opened_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                entry_price, size, cost, current_price, status, opened_at, paper_trade)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos["market_id"],
                 pos["token_id"],
@@ -66,6 +66,7 @@ class TradeLog:
                 pos.get("current_price", pos["entry_price"]),
                 "open",
                 datetime.now(timezone.utc).isoformat(),
+                1 if pos.get("paper_trade", True) else 0,
             ),
         )
         self.conn.commit()
@@ -78,19 +79,25 @@ class TradeLog:
         )
         self.conn.commit()
 
-    def get_open_positions(self) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT * FROM positions WHERE status='open'"
-        ).fetchall()
+    def get_open_positions(self, paper_trade: bool | None = None) -> list[dict]:
+        if paper_trade is not None:
+            rows = self.conn.execute(
+                "SELECT * FROM positions WHERE status='open' AND paper_trade=?",
+                (1 if paper_trade else 0,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM positions WHERE status='open'"
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def compute_paper_balance(self, starting_capital: float) -> float:
-        """Derive paper balance from DB: starting_capital + closed PnL - open cost."""
+        """Derive paper balance from DB: starting_capital + closed PnL - open cost (paper only)."""
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(realized_pnl), 0) as total_pnl FROM positions WHERE status='closed'"
+            "SELECT COALESCE(SUM(realized_pnl), 0) as total_pnl FROM positions WHERE status='closed' AND paper_trade=1"
         ).fetchone()
         row2 = self.conn.execute(
-            "SELECT COALESCE(SUM(cost), 0) as open_cost FROM positions WHERE status='open'"
+            "SELECT COALESCE(SUM(cost), 0) as open_cost FROM positions WHERE status='open' AND paper_trade=1"
         ).fetchone()
         return starting_capital + row["total_pnl"] - row2["open_cost"]
 

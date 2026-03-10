@@ -107,6 +107,7 @@ class PaperExecutor:
             "size": trade.size,
             "cost": round(actual_cost, 4),
             "trade_id": trade_id,
+            "paper_trade": True,
         }
         pos_id = self.trade_log.save_position(position)
 
@@ -118,7 +119,7 @@ class PaperExecutor:
 
     def fill_order(self, order: dict) -> dict:
         """Called by order_manager when probabilistic fill triggers."""
-        if len(self.get_open_positions()) >= self.max_open_positions:
+        if len(self.trade_log.get_open_positions(paper_trade=True)) >= self.max_open_positions:
             logger.info(f"Paper: rejected fill — {self.max_open_positions} positions already open")
             return {"status": "rejected", "reason": "max_positions_reached"}
 
@@ -135,6 +136,7 @@ class PaperExecutor:
             "size": order["size"],
             "cost": round(actual_cost, 4),
             "trade_id": order["trade_id"],
+            "paper_trade": True,
         }
         pos_id = self.trade_log.save_position(position)
 
@@ -150,7 +152,7 @@ class PaperExecutor:
         return self.trade_log.compute_paper_balance(self.starting_balance)
 
     def get_open_positions(self) -> list[dict]:
-        return self.trade_log.get_open_positions()
+        return self.trade_log.get_open_positions(paper_trade=True)
 
     def close_position(self, position_id: int, exit_price: float):
         pos = self.trade_log.get_position_by_id(position_id)
