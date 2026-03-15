@@ -16,6 +16,11 @@ DEFAULTS = {
     "min_trade_size": 0.50,
     "consecutive_loss_pause": 3,
     "max_positions_per_market": 1,
+    "high_prob_max_positions": 8,
+    "btc_updown_max_positions": 3,
+    "llm_max_positions": 2,
+    "max_long_term_positions": 5,
+    "long_term_threshold_days": 7,
 
     # Market filter defaults
     "min_volume_24h": 500.0,
@@ -41,6 +46,11 @@ DEFAULTS = {
     "high_prob_longshot_conf_multiplier": 2.0,
     "high_prob_maker_ttl_hours": 4,
     "arb_min_spread": 0.005,
+    "arb_fee_rate": 0.0625,
+    "arb_min_event_markets": 3,
+    "arb_min_event_spread": 0.02,
+    "arb_max_event_legs": 6,
+    "arb_mono_min_spread": 0.01,
 
     # Strategy selection
     "only_strategies": [],  # empty = all strategies enabled
