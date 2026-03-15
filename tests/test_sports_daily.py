@@ -18,7 +18,7 @@ def make_settings(**overrides):
         "sports_daily_min_liquidity": 1000.0,
         "sports_daily_min_spread": 0.04,
         "sports_daily_max_spread": 0.40,
-        "sports_daily_min_book_depth": 50.0,
+        "sports_daily_min_book_depth": 20.0,
         "sports_daily_max_hours_to_resolution": 24,
         "sports_daily_favorite_min_prob": 0.82,
         "sports_daily_favorite_max_prob": 0.95,

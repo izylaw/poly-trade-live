@@ -274,13 +274,15 @@ class SportsDailyStrategy(Strategy):
 
             # Gate: skip empty/illiquid books and excessively wide spreads
             if spread > self.max_spread:
-                logger.debug(
+                logger.info(
                     f"sports_daily: skip {outcome} '{question[:40]}' spread={spread:.2f} > max={self.max_spread}"
                 )
                 continue
-            if not self._is_book_liquid(book, self.min_book_depth):
-                logger.debug(
-                    f"sports_daily: skip {outcome} '{question[:40]}' book too thin"
+            bid_depth, ask_depth = self._book_depth(book)
+            if not (bid_depth >= self.min_book_depth and ask_depth >= self.min_book_depth):
+                logger.info(
+                    f"sports_daily: skip {outcome} '{question[:40]}' thin book "
+                    f"bid_depth=${bid_depth:.0f} ask_depth=${ask_depth:.0f} (min=${self.min_book_depth:.0f})"
                 )
                 continue
 
@@ -519,10 +521,10 @@ class SportsDailyStrategy(Strategy):
     # --- Helpers ---
 
     @staticmethod
-    def _is_book_liquid(book, min_depth: float) -> bool:
-        """Check if both sides of the book have sufficient dollar depth."""
+    def _book_depth(book) -> tuple[float, float]:
+        """Return (bid_dollar_depth, ask_dollar_depth) across top 5 levels."""
         if book is None:
-            return False
+            return 0.0, 0.0
 
         bid_depth = 0.0
         ask_depth = 0.0
@@ -539,6 +541,12 @@ class SportsDailyStrategy(Strategy):
                 except (AttributeError, ValueError):
                     pass
 
+        return bid_depth, ask_depth
+
+    @staticmethod
+    def _is_book_liquid(book, min_depth: float) -> bool:
+        """Check if both sides of the book have sufficient dollar depth."""
+        bid_depth, ask_depth = SportsDailyStrategy._book_depth(book)
         return bid_depth >= min_depth and ask_depth >= min_depth
 
     @staticmethod
