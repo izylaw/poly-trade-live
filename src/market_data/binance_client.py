@@ -16,9 +16,9 @@ ASSET_SYMBOLS = {
 
 
 class BinanceClient:
-    def __init__(self):
+    def __init__(self, cache_ttl: float = 10.0):
         self._cache: dict[str, tuple[float, any]] = {}
-        self._cache_ttl = 10.0  # 10s cache for klines
+        self._cache_ttl = cache_ttl
 
     def _get_cached(self, key: str):
         if key in self._cache:
@@ -68,6 +68,12 @@ class BinanceClient:
 
     @retry(max_attempts=3)
     def get_recent_trades(self, asset: str, limit: int = 500) -> list[dict]:
+        cache_key = f"trades_{asset}_{limit}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            logger.debug(f"Binance {asset} trades: cache hit")
+            return cached
+
         symbol = self._symbol(asset)
         resp = requests.get(
             f"{BINANCE_API_URL}/api/v3/trades",
@@ -76,11 +82,18 @@ class BinanceClient:
         )
         resp.raise_for_status()
         trades = resp.json()
+        self._set_cache(cache_key, trades)
         logger.info(f"Binance {asset} trades: {len(trades)} fetched")
         return trades
 
     @retry(max_attempts=3)
     def get_orderbook(self, asset: str, limit: int = 20) -> dict:
+        cache_key = f"book_{asset}_{limit}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            logger.debug(f"Binance {asset} book: cache hit")
+            return cached
+
         symbol = self._symbol(asset)
         resp = requests.get(
             f"{BINANCE_API_URL}/api/v3/depth",
@@ -89,6 +102,7 @@ class BinanceClient:
         )
         resp.raise_for_status()
         book = resp.json()
+        self._set_cache(cache_key, book)
         bids = book.get("bids", [])
         asks = book.get("asks", [])
         if bids and asks:
@@ -112,6 +126,12 @@ class BinanceClient:
 
     @retry(max_attempts=3)
     def get_price(self, asset: str) -> float:
+        cache_key = f"price_{asset}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            logger.debug(f"Binance {asset} price: cache hit")
+            return cached
+
         symbol = self._symbol(asset)
         resp = requests.get(
             f"{BINANCE_API_URL}/api/v3/ticker/price",
@@ -119,4 +139,6 @@ class BinanceClient:
             timeout=10,
         )
         resp.raise_for_status()
-        return float(resp.json()["price"])
+        price = float(resp.json()["price"])
+        self._set_cache(cache_key, price)
+        return price

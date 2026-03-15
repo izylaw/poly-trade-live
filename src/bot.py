@@ -22,6 +22,7 @@ from src.core.balance_manager import BalanceManager
 from src.core.position_tracker import PositionTracker
 from src.core.order_manager import OrderManager
 from src.core.engine import TradingEngine
+from src.market_data.binance_client import BinanceClient
 from src.strategies.high_probability import HighProbabilityStrategy
 from src.strategies.arbitrage import ArbitrageStrategy
 from src.strategies.btc_updown import BtcUpdownStrategy
@@ -67,22 +68,25 @@ class Bot:
         risk_manager = RiskManager(s, circuit_breaker)
 
         # Execution
-        paper = PaperExecutor(s.starting_capital, trade_log, s.max_open_positions) if s.paper_trading else None
-        live = LiveExecutor(clob, trade_log, s.max_open_positions) if not s.paper_trading else None
+        paper = PaperExecutor(s.starting_capital, trade_log, s.max_open_positions, s.long_term_threshold_days) if s.paper_trading else None
+        live = LiveExecutor(clob, trade_log, s.max_open_positions, s.long_term_threshold_days) if not s.paper_trading else None
         executor = Executor(s, paper=paper, live=live)
+
+        # Shared Binance client for all crypto strategies (30s cache)
+        binance = BinanceClient(cache_ttl=30.0)
 
         # Strategies
         strategies = [
             HighProbabilityStrategy(s),
             ArbitrageStrategy(s),
-            BtcUpdownStrategy(s),
-            SafeCompounderStrategy(s),
+            BtcUpdownStrategy(s, binance=binance),
+            SafeCompounderStrategy(s, binance=binance),
             SportsDailyStrategy(s),
         ]
 
         if s.llm_enabled:
             from src.strategies.llm_crypto import LLMCryptoStrategy
-            strategies.append(LLMCryptoStrategy(s))
+            strategies.append(LLMCryptoStrategy(s, binance=binance))
             logger.info("LLM Crypto strategy enabled")
 
         # Adaptive — resolve goal start date with priority chain:
@@ -106,7 +110,10 @@ class Bot:
         # Core
         balance_mgr = BalanceManager(s)
         position_tracker = PositionTracker(trade_log, paper_mode=s.paper_trading)
-        order_manager = OrderManager(trade_log, s.max_open_positions)
+        order_manager = OrderManager(
+            trade_log, s.max_open_positions,
+            strategy_limits={"high_probability": s.high_prob_max_positions},
+        )
 
         self.engine = TradingEngine(
             settings=s,
