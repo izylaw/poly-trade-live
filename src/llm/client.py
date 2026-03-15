@@ -10,7 +10,7 @@ class LLMClient:
     def __init__(self, base_url: str = "http://100.96.38.49:11434",
                  model: str = "qwen3.5:27b", timeout: int = 30,
                  api_key: str = "", context_size: int = 8192):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = base_url.rstrip("/").removesuffix("/v1")
         self.model = model
         self.timeout = timeout
         self.api_key = api_key
