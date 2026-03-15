@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from src.strategies.base import Strategy
 from src.risk.risk_manager import TradeSignal
 from src.config.settings import Settings
@@ -15,9 +16,9 @@ class BtcUpdownStrategy(Strategy):
     name = "btc_updown"
     self_discovering = True
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, binance: BinanceClient | None = None):
         super().__init__(settings)
-        self.binance = BinanceClient()
+        self.binance = binance or BinanceClient()
         self.gamma = GammaClient()
         self.assets = settings.btc_updown_assets
         self.intervals = settings.btc_updown_intervals
@@ -31,29 +32,69 @@ class BtcUpdownStrategy(Strategy):
         self.maker_edge_cushion = settings.btc_updown_maker_edge_cushion
         self._pending_predictions: list[dict] = []
 
+    def _prefetch_asset_data(self, asset: str) -> dict:
+        """Fetch all Binance data for an asset in one go."""
+        price = self.binance.get_price(asset)
+        klines_1m = self.binance.get_klines(asset, "1m", 30)
+        atr = None
+        try:
+            atr = self.binance.compute_atr(asset, "5m", 14)
+        except Exception:
+            pass
+        momentum = self._compute_momentum_confirmation(asset)
+        return {
+            "price": price,
+            "klines_1m": klines_1m,
+            "atr": atr,
+            "momentum": momentum,
+        }
+
     def analyze(self, markets: list[dict], clob_client) -> list[TradeSignal]:
         self._pending_predictions = []
+
+        # Parallel prefetch all asset data
+        asset_data = {}
+        with ThreadPoolExecutor(max_workers=len(self.assets)) as pool:
+            futures = {asset: pool.submit(self._prefetch_asset_data, asset)
+                       for asset in self.assets}
+            for asset, future in futures.items():
+                try:
+                    asset_data[asset] = future.result()
+                except Exception as e:
+                    logger.warning(f"btc_updown: prefetch failed for {asset}: {e}")
+
         signals = []
         for asset in self.assets:
+            if asset not in asset_data:
+                continue
             for interval in self.intervals:
                 try:
-                    asset_signals = self._analyze_asset_interval(asset, interval, clob_client)
+                    asset_signals = self._analyze_asset_interval(
+                        asset, interval, clob_client, asset_data[asset],
+                    )
                     signals.extend(asset_signals)
                 except Exception as e:
                     logger.warning(f"btc_updown: error analyzing {asset} {interval}: {e}")
         signals.sort(key=lambda s: s.expected_value, reverse=True)
         return signals
 
-    def _analyze_asset_interval(self, asset: str, interval: str, clob_client) -> list[TradeSignal]:
+    def _analyze_asset_interval(self, asset: str, interval: str, clob_client,
+                                prefetched: dict) -> list[TradeSignal]:
         active_markets = self._discover_markets(asset, interval)
         if not active_markets:
             logger.debug(f"btc_updown: no active {asset} {interval} markets found")
             return []
 
+        # Compute delta once per asset-interval using prefetched data
+        price = prefetched["price"]
+        klines = prefetched["klines_1m"]
+        atr = prefetched["atr"]
+        atr_vol = atr / price if atr and price > 0 else self.btc_5m_vol
+        momentum = prefetched["momentum"]
+
         signals = []
         for market in active_markets:
-            delta_info = self._compute_price_delta(asset, market)
-            momentum = self._compute_momentum_confirmation(asset)
+            delta_info = self._compute_delta_from_prefetched(price, klines, atr_vol, market)
             signal, predictions = self._evaluate_both_sides(
                 market, asset, delta_info, momentum, clob_client, interval=interval,
             )
@@ -62,28 +103,20 @@ class BtcUpdownStrategy(Strategy):
                 signals.append(signal)
         return sorted(signals, key=lambda s: s.expected_value, reverse=True)
 
-    def _compute_price_delta(self, asset: str, market: dict) -> dict:
-        current_price = self.binance.get_price(asset)
+    def _compute_delta_from_prefetched(self, current_price: float, klines: list[dict],
+                                       dynamic_vol: float, market: dict) -> dict:
+        """Compute price delta using pre-fetched data (no Binance calls)."""
         start_ts = market.get("_start_ts", 0)
         resolution_ts = market.get("_resolution_ts", 0)
 
-        # Get 1-min klines to find reference price at start_ts
-        try:
-            klines = self.binance.get_klines(asset, interval="1m", limit=30)
-        except Exception as e:
-            logger.warning(f"btc_updown: failed to fetch klines for {asset}: {e}")
-            klines = []
-
         reference_price = current_price  # fallback: no delta
         if klines:
-            # Find the kline whose open_time covers start_ts
             start_ts_ms = start_ts * 1000
             for k in klines:
                 if k["open_time"] <= start_ts_ms <= k["close_time"]:
                     reference_price = k["open"]
                     break
             else:
-                # If start_ts is before all klines, use earliest kline open
                 if klines[0]["open_time"] > start_ts_ms:
                     reference_price = klines[0]["open"]
 
@@ -94,20 +127,10 @@ class BtcUpdownStrategy(Strategy):
 
         delta_pct = (current_price - reference_price) / reference_price if reference_price > 0 else 0.0
 
-        # Dynamic ATR-based volatility
-        dynamic_vol = self.btc_5m_vol  # fallback
-        try:
-            atr = self.binance.compute_atr(asset, "5m", 14)
-            if atr is not None and current_price > 0:
-                dynamic_vol = atr / current_price
-        except Exception as e:
-            logger.warning(f"btc_updown: ATR failed for {asset}, using default vol: {e}")
-
         logger.info(
-            f"btc_updown: {asset} delta={delta_pct:+.4%} | ref=${reference_price:,.2f} | "
+            f"btc_updown: delta={delta_pct:+.4%} | ref=${reference_price:,.2f} | "
             f"now=${current_price:,.2f} | progress={window_progress:.2f} | "
-            f"vol={dynamic_vol:.4f} ({'dynamic' if dynamic_vol != self.btc_5m_vol else 'default'}) "
-            f"vs {self.btc_5m_vol:.4f} (baseline)"
+            f"vol={dynamic_vol:.4f} vs {self.btc_5m_vol:.4f} (baseline)"
         )
 
         return {
@@ -243,6 +266,7 @@ class BtcUpdownStrategy(Strategy):
                     order_type="GTC",
                     post_only=True,
                     cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
+                    resolution_ts=resolution_ts,
                 )
 
         return best_signal, predictions

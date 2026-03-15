@@ -201,12 +201,12 @@ class TestPriceDelta:
             "close_time": int(start_ts_ms) + 30000,
         }]
 
-        strategy.binance.get_price = MagicMock(return_value=68150.0)
-        strategy.binance.get_klines = MagicMock(return_value=klines)
-        strategy.binance.compute_atr = MagicMock(return_value=68.0)
+        current_price = 68150.0
+        atr = 68.0
+        atr_vol = atr / current_price
 
         market = {"_start_ts": start_ts, "_resolution_ts": start_ts + 300}
-        result = strategy._compute_price_delta("BTC", market)
+        result = strategy._compute_delta_from_prefetched(current_price, klines, atr_vol, market)
 
         assert result["reference_price"] == 68000.0
         assert result["current_price"] == 68150.0

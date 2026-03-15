@@ -8,6 +8,7 @@ without changing their logic.
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from src.strategies.base import Strategy
 from src.strategies.crypto_utils import compute_price_delta, compute_momentum
@@ -32,9 +33,9 @@ class LLMCryptoStrategy(Strategy):
     name = "llm_crypto"
     self_discovering = True
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, binance: BinanceClient | None = None):
         super().__init__(settings)
-        self.binance = BinanceClient()
+        self.binance = binance or BinanceClient()
         self.gamma = GammaClient()
         self.llm = LLMClient(
             base_url=settings.llm_base_url,
@@ -59,6 +60,42 @@ class LLMCryptoStrategy(Strategy):
         self._cycle_counter = 0
         self._cache: dict[str, tuple[float, dict]] = {}  # conditionId -> (timestamp, assessment)
 
+    def _prefetch_asset_data(self, asset: str) -> dict:
+        """Fetch all Binance data for an asset in one go."""
+        price = self.binance.get_price(asset)
+        klines_1m = self.binance.get_klines(asset, "1m", 30)
+        atr = None
+        try:
+            atr = self.binance.compute_atr(asset, "5m", 14)
+        except Exception:
+            pass
+        momentum = compute_momentum(self.binance, asset)
+
+        dynamic_vol = self.btc_5m_vol
+        if atr is not None and price > 0:
+            dynamic_vol = atr / price
+
+        klines_15m = []
+        klines_1h = []
+        try:
+            klines_15m = self.binance.get_klines(asset, interval="15m", limit=5)
+        except Exception:
+            pass
+        try:
+            klines_1h = self.binance.get_klines(asset, interval="1h", limit=5)
+        except Exception:
+            pass
+
+        return {
+            "price": price,
+            "klines_1m": klines_1m,
+            "atr": atr,
+            "momentum": momentum,
+            "dynamic_vol": dynamic_vol,
+            "klines_15m": klines_15m,
+            "klines_1h": klines_1h,
+        }
+
     def analyze(self, markets: list[dict], clob_client) -> list[TradeSignal]:
         self._cycle_counter += 1
 
@@ -69,12 +106,27 @@ class LLMCryptoStrategy(Strategy):
             )
             return []
 
+        # Parallel prefetch all asset data
+        asset_data = {}
+        with ThreadPoolExecutor(max_workers=len(self.assets)) as pool:
+            futures = {asset: pool.submit(self._prefetch_asset_data, asset)
+                       for asset in self.assets}
+            for asset, future in futures.items():
+                try:
+                    asset_data[asset] = future.result()
+                except Exception as e:
+                    logger.warning(f"llm_crypto: prefetch failed for {asset}: {e}")
+
         # Source 1: Up/Down interval markets (1h, 4h)
         all_markets_data = []
         for asset in self.assets:
+            if asset not in asset_data:
+                continue
             for interval in self.llm_intervals:
                 try:
-                    market_data = self._gather_market_data(asset, interval, clob_client)
+                    market_data = self._gather_market_data(
+                        asset, interval, clob_client, asset_data[asset],
+                    )
                     all_markets_data.extend(market_data)
                 except Exception as e:
                     logger.warning(f"llm_crypto: error gathering {asset} {interval}: {e}")
@@ -85,7 +137,7 @@ class LLMCryptoStrategy(Strategy):
                 self.assets, self.daily_lookahead,
             )
             all_markets_data.extend(
-                self._gather_general_market_data(daily_markets, clob_client)
+                self._gather_general_market_data(daily_markets, clob_client, asset_data)
             )
         except Exception as e:
             logger.warning(f"llm_crypto: error gathering daily markets: {e}")
@@ -94,7 +146,7 @@ class LLMCryptoStrategy(Strategy):
         try:
             weekly_markets = self.gamma.get_crypto_weekly_markets()
             all_markets_data.extend(
-                self._gather_general_market_data(weekly_markets, clob_client)
+                self._gather_general_market_data(weekly_markets, clob_client, asset_data)
             )
         except Exception as e:
             logger.warning(f"llm_crypto: error gathering weekly markets: {e}")
@@ -103,7 +155,7 @@ class LLMCryptoStrategy(Strategy):
         try:
             monthly_markets = self.gamma.get_crypto_monthly_markets()
             all_markets_data.extend(
-                self._gather_general_market_data(monthly_markets, clob_client)
+                self._gather_general_market_data(monthly_markets, clob_client, asset_data)
             )
         except Exception as e:
             logger.warning(f"llm_crypto: error gathering monthly markets: {e}")
@@ -129,7 +181,8 @@ class LLMCryptoStrategy(Strategy):
         signals.sort(key=lambda s: s.expected_value, reverse=True)
         return signals
 
-    def _gather_market_data(self, asset: str, interval: str, clob_client) -> list[dict]:
+    def _gather_market_data(self, asset: str, interval: str, clob_client,
+                            prefetched: dict) -> list[dict]:
         """Discover markets and gather data for uncached ones."""
         active_markets = discover_crypto_markets(
             self.gamma, asset, interval, strategy_name=self.name,
@@ -139,6 +192,9 @@ class LLMCryptoStrategy(Strategy):
 
         result = []
         now = time.time()
+        momentum = prefetched["momentum"]
+        klines = prefetched.get("klines_1m", [])[:5]
+
         for market in active_markets:
             condition_id = market.get("conditionId", market.get("condition_id", ""))
             if not condition_id:
@@ -151,11 +207,11 @@ class LLMCryptoStrategy(Strategy):
                     logger.debug(f"llm_crypto: cache hit for {condition_id[:12]}")
                     continue
 
-            # Gather Binance data
+            # Gather Binance data using prefetched
             delta_info = compute_price_delta(
                 self.binance, asset, market, self.btc_5m_vol, logger,
+                prefetched=prefetched,
             )
-            momentum = compute_momentum(self.binance, asset)
 
             # Gather CLOB prices
             tokens = market.get("clobTokenIds", [])
@@ -171,12 +227,6 @@ class LLMCryptoStrategy(Strategy):
                         best_ask = price_data.get("ask", 1.0)
                     elif price_data and idx == 1:
                         no_price = price_data.get("ask", 0.5)
-
-            # Fetch recent klines
-            try:
-                klines = self.binance.get_klines(asset, interval="1m", limit=5)
-            except Exception:
-                klines = []
 
             result.append({
                 "market_id": condition_id,
@@ -206,11 +256,12 @@ class LLMCryptoStrategy(Strategy):
 
         return result
 
-    def _gather_general_market_data(self, markets: list[dict], clob_client) -> list[dict]:
+    def _gather_general_market_data(self, markets: list[dict], clob_client,
+                                    prefetched_by_asset: dict[str, dict]) -> list[dict]:
         """Gather data for non-updown markets (daily, weekly, monthly).
 
-        Pre-fetches Binance data once per asset to avoid redundant API calls,
-        then caps markets at batch_size * 2 to limit CLOB calls.
+        Uses pre-fetched Binance data from analyze(), caps markets at
+        batch_size * 2 to limit CLOB calls.
         """
         from datetime import datetime as _dt
 
@@ -247,51 +298,14 @@ class LLMCryptoStrategy(Strategy):
             f"(of {len(markets)} discovered)"
         )
 
-        # Phase 2: pre-fetch Binance data once per asset
-        assets_needed = {m.get("_asset", "BTC") for m, _, _, _ in uncached}
-        asset_data: dict[str, dict] = {}
-        for asset in assets_needed:
-            try:
-                current_price = self.binance.get_price(asset)
-                momentum = compute_momentum(self.binance, asset)
-
-                dynamic_vol = self.btc_5m_vol
-                try:
-                    atr = self.binance.compute_atr(asset, "5m", 14)
-                    if atr is not None and current_price > 0:
-                        dynamic_vol = atr / current_price
-                except Exception:
-                    pass
-
-                klines_15m = []
-                klines_1h = []
-                try:
-                    klines_15m = self.binance.get_klines(asset, interval="15m", limit=5)
-                except Exception:
-                    pass
-                try:
-                    klines_1h = self.binance.get_klines(asset, interval="1h", limit=5)
-                except Exception:
-                    pass
-
-                asset_data[asset] = {
-                    "current_price": current_price,
-                    "momentum": momentum,
-                    "dynamic_vol": dynamic_vol,
-                    "klines_15m": klines_15m,
-                    "klines_1h": klines_1h,
-                }
-            except Exception as e:
-                logger.warning(f"llm_crypto: Binance data failed for {asset}: {e}")
-
-        # Phase 3: build market data using pre-fetched Binance data + per-market CLOB
+        # Phase 2: build market data using pre-fetched Binance data + per-market CLOB
         result = []
         for market, condition_id, tokens, outcomes in uncached:
             asset = market.get("_asset", "BTC")
-            if asset not in asset_data:
+            if asset not in prefetched_by_asset:
                 continue
 
-            ad = asset_data[asset]
+            ad = prefetched_by_asset[asset]
             market_type = market.get("_market_type", "")
 
             # Resolution time from endDate
@@ -326,6 +340,8 @@ class LLMCryptoStrategy(Strategy):
             ) else "1h"
             klines = ad.get(f"klines_{kline_interval}", [])
 
+            current_price = ad["price"]
+
             result.append({
                 "market_id": condition_id,
                 "asset": asset,
@@ -333,8 +349,8 @@ class LLMCryptoStrategy(Strategy):
                 "market_type": market_type,
                 "kline_interval": kline_interval,
                 "question": market.get("question", ""),
-                "current_price": ad["current_price"],
-                "reference_price": ad["current_price"],
+                "current_price": current_price,
+                "reference_price": current_price,
                 "delta_pct": 0.0,
                 "window_progress": 0.0,
                 "time_remaining": time_remaining,
@@ -455,6 +471,7 @@ class LLMCryptoStrategy(Strategy):
                 order_type="GTC",
                 post_only=True,
                 cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
+                resolution_ts=resolution_ts,
             ))
 
         return signals

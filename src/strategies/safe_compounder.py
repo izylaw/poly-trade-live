@@ -9,6 +9,7 @@ Innovations over btc_updown:
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from src.strategies.base import Strategy
 from src.strategies.crypto_utils import (
@@ -30,9 +31,9 @@ class SafeCompounderStrategy(Strategy):
     name = "safe_compounder"
     self_discovering = True
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, binance: BinanceClient | None = None):
         super().__init__(settings)
-        self.binance = BinanceClient()
+        self.binance = binance or BinanceClient()
         self.gamma = GammaClient()
         self.assets = settings.safe_compounder_assets
         self.intervals = settings.safe_compounder_intervals
@@ -50,15 +51,47 @@ class SafeCompounderStrategy(Strategy):
         self._pending_predictions: list[dict] = []
         self._btc_delta_cache: dict[str, float] = {}
 
+    def _prefetch_asset_data(self, asset: str) -> dict:
+        """Fetch all Binance data for an asset in one go."""
+        price = self.binance.get_price(asset)
+        klines_1m = self.binance.get_klines(asset, "1m", 30)
+        atr = None
+        try:
+            atr = self.binance.compute_atr(asset, "5m", 14)
+        except Exception:
+            pass
+        momentum = compute_momentum(self.binance, asset)
+        return {
+            "price": price,
+            "klines_1m": klines_1m,
+            "atr": atr,
+            "momentum": momentum,
+        }
+
     def analyze(self, markets: list[dict], clob_client) -> list[TradeSignal]:
         self._pending_predictions = []
         self._btc_delta_cache = {}
-        signals = []
 
+        # Parallel prefetch all asset data
+        asset_data = {}
+        with ThreadPoolExecutor(max_workers=len(self.assets)) as pool:
+            futures = {asset: pool.submit(self._prefetch_asset_data, asset)
+                       for asset in self.assets}
+            for asset, future in futures.items():
+                try:
+                    asset_data[asset] = future.result()
+                except Exception as e:
+                    logger.warning(f"safe_compounder: prefetch failed for {asset}: {e}")
+
+        signals = []
         for asset in self.assets:
+            if asset not in asset_data:
+                continue
             for interval in self.intervals:
                 try:
-                    sigs = self._analyze_asset_interval(asset, interval, clob_client)
+                    sigs = self._analyze_asset_interval(
+                        asset, interval, clob_client, asset_data[asset],
+                    )
                     signals.extend(sigs)
                 except Exception as e:
                     logger.warning(f"safe_compounder: error analyzing {asset} {interval}: {e}")
@@ -66,14 +99,20 @@ class SafeCompounderStrategy(Strategy):
         signals.sort(key=lambda s: s.expected_value, reverse=True)
         return signals
 
-    def _analyze_asset_interval(self, asset: str, interval: str, clob_client) -> list[TradeSignal]:
+    def _analyze_asset_interval(self, asset: str, interval: str, clob_client,
+                                prefetched: dict) -> list[TradeSignal]:
         active_markets = self._discover_markets(asset, interval)
         if not active_markets:
             return []
 
+        momentum = prefetched["momentum"]
+
         signals = []
         for market in active_markets:
-            delta_info = compute_price_delta(self.binance, asset, market, self.btc_5m_vol, logger)
+            delta_info = compute_price_delta(
+                self.binance, asset, market, self.btc_5m_vol, logger,
+                prefetched=prefetched,
+            )
             window_progress = delta_info["window_progress"]
 
             # Late-window filter: only trade when progress > threshold
@@ -83,8 +122,6 @@ class SafeCompounderStrategy(Strategy):
                     f"< {self.min_window_progress} — skipping (not late window)"
                 )
                 continue
-
-            momentum = compute_momentum(self.binance, asset)
 
             # Cache BTC delta for cross-asset boost
             if asset == "BTC":
@@ -279,6 +316,7 @@ class SafeCompounderStrategy(Strategy):
                 order_type="GTC",
                 post_only=True,
                 cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
+                resolution_ts=resolution_ts,
             ))
 
         return signals
@@ -373,6 +411,7 @@ class SafeCompounderStrategy(Strategy):
                     order_type="GTC",
                     post_only=True,
                     cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
+                    resolution_ts=resolution_ts,
                 )
 
         return best_signal

@@ -24,20 +24,36 @@ def estimate_outcome_probability(
     return clamp(prob, 0.05, 0.95)
 
 
-def compute_price_delta(binance, asset: str, market: dict, btc_5m_vol: float, logger=None) -> dict:
-    """Compute price delta info for an asset within a market window."""
+def compute_price_delta(binance, asset: str, market: dict, btc_5m_vol: float,
+                        logger=None, prefetched: dict | None = None) -> dict:
+    """Compute price delta info for an asset within a market window.
+
+    If prefetched is provided, uses pre-fetched data instead of calling Binance.
+    Expected keys: "price", "klines_1m", "atr".
+    """
     import time as _time
 
-    current_price = binance.get_price(asset)
+    if prefetched:
+        current_price = prefetched["price"]
+        klines = prefetched.get("klines_1m", [])
+        atr = prefetched.get("atr")
+    else:
+        current_price = binance.get_price(asset)
+        try:
+            klines = binance.get_klines(asset, interval="1m", limit=30)
+        except Exception as e:
+            if logger:
+                logger.warning(f"crypto_utils: failed to fetch klines for {asset}: {e}")
+            klines = []
+        try:
+            atr = binance.compute_atr(asset, "5m", 14)
+        except Exception as e:
+            if logger:
+                logger.warning(f"crypto_utils: ATR failed for {asset}, using default vol: {e}")
+            atr = None
+
     start_ts = market.get("_start_ts", 0)
     resolution_ts = market.get("_resolution_ts", 0)
-
-    try:
-        klines = binance.get_klines(asset, interval="1m", limit=30)
-    except Exception as e:
-        if logger:
-            logger.warning(f"crypto_utils: failed to fetch klines for {asset}: {e}")
-        klines = []
 
     reference_price = current_price
     if klines:
@@ -58,13 +74,8 @@ def compute_price_delta(binance, asset: str, market: dict, btc_5m_vol: float, lo
     delta_pct = (current_price - reference_price) / reference_price if reference_price > 0 else 0.0
 
     dynamic_vol = btc_5m_vol
-    try:
-        atr = binance.compute_atr(asset, "5m", 14)
-        if atr is not None and current_price > 0:
-            dynamic_vol = atr / current_price
-    except Exception as e:
-        if logger:
-            logger.warning(f"crypto_utils: ATR failed for {asset}, using default vol: {e}")
+    if atr is not None and current_price > 0:
+        dynamic_vol = atr / current_price
 
     return {
         "current_price": current_price,
@@ -77,8 +88,14 @@ def compute_price_delta(binance, asset: str, market: dict, btc_5m_vol: float, lo
     }
 
 
-def compute_momentum(binance, asset: str) -> float:
-    """Combined trade flow + orderbook imbalance momentum signal."""
+def compute_momentum(binance, asset: str, prefetched: dict | None = None) -> float:
+    """Combined trade flow + orderbook imbalance momentum signal.
+
+    If prefetched is provided, uses pre-fetched "trades" and "orderbook" data.
+    """
+    if prefetched and "momentum" in prefetched:
+        return prefetched["momentum"]
+
     try:
         trade_flow = _calc_trade_flow(binance, asset)
     except Exception:
