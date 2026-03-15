@@ -101,7 +101,7 @@ class SportsDailyStrategy(Strategy):
         """Find sports markets resolving within max_hours_to_resolution."""
         all_markets = []
 
-        # Try tag-based search for each configured tag (parallel pagination)
+        # Source 1: tag-based search for each configured tag (parallel pagination)
         for tag in self.tags_to_search:
             try:
                 events = self.gamma.get_all_events_by_tag(tag)
@@ -118,24 +118,24 @@ class SportsDailyStrategy(Strategy):
             except Exception as e:
                 logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
 
-        # Fallback: scan all active events and filter by keywords (paginate fully)
-        if not all_markets:
-            try:
-                for page in range(30):
-                    events = self.gamma.get_active_events(limit=100, offset=page * 100)
-                    if not events:
-                        break
-                    for event in events:
-                        title = event.get("title", "")
-                        slug = event.get("slug", "")
-                        tags = event.get("tags", [])
-                        if self._is_sports_event(title, slug, tags):
-                            for m in event.get("markets", []):
-                                m["_event_title"] = title
-                                m["_event_slug"] = slug
-                                all_markets.append(m)
-            except Exception as e:
-                logger.warning(f"sports_daily: fallback event scan failed: {e}")
+        # Source 2: scan all active events and filter by keywords (catches
+        # sports events not tagged with any of the configured tags)
+        try:
+            for page in range(30):
+                events = self.gamma.get_active_events(limit=100, offset=page * 100)
+                if not events:
+                    break
+                for event in events:
+                    title = event.get("title", "")
+                    slug = event.get("slug", "")
+                    tags = event.get("tags", [])
+                    if self._is_sports_event(title, slug, tags):
+                        for m in event.get("markets", []):
+                            m["_event_title"] = title
+                            m["_event_slug"] = slug
+                            all_markets.append(m)
+        except Exception as e:
+            logger.warning(f"sports_daily: event scan failed: {e}")
 
         # Deduplicate by conditionId
         seen = set()
