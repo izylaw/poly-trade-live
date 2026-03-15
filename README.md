@@ -178,6 +178,39 @@ src/
     └── retry.py             # Exponential backoff for API calls
 ```
 
+## Copy Trade Bot (Dry-Run)
+
+A dedicated copy-trading monitor is included at:
+
+```bash
+python scripts/copy_trade_bot.py --wallets-file scanner/results.json --max-wallets 100 --dry-run
+```
+
+What it does:
+- Monitors up to 100 wallets
+- Pulls recent `TRADE` activity from Polymarket Data API
+- Mirrors trades in dry-run mode (logs intents, no execution)
+- Applies risk controls:
+  - max mirror USD per trade
+  - daily loss stop
+  - per-wallet trade rate limit
+  - per-cycle mirror cap
+
+Output log:
+- `logs/copy_trade_events.jsonl`
+
+Example (single quick pass by stopping after first cycle manually):
+```bash
+python scripts/copy_trade_bot.py \
+  --wallets-file scanner/results.json \
+  --max-wallets 100 \
+  --interval-sec 20 \
+  --lookback-sec 120 \
+  --max-mirror-usd-per-trade 15 \
+  --daily-loss-limit-usd 50 \
+  --dry-run
+```
+
 ## Tests
 
 ```bash

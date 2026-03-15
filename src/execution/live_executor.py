@@ -65,6 +65,7 @@ class LiveExecutor:
                 "entry_price": trade.signal.price,
                 "size": trade.size,
                 "cost": round(trade.cost, 4),
+                "paper_trade": False,
             }
             pos_id = self.trade_log.save_position(position)
         else:
@@ -80,4 +81,4 @@ class LiveExecutor:
         return self.clob.get_balance()
 
     def get_open_positions(self) -> list[dict]:
-        return self.trade_log.get_open_positions()
+        return self.trade_log.get_open_positions(paper_trade=False)

@@ -1,5 +1,8 @@
+import fcntl
 import logging
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from src.config.settings import Settings
 from src.utils.logger import setup_logger
 from src.storage.db import init_db
@@ -28,10 +31,17 @@ from src.strategies.sports_daily import SportsDailyStrategy
 logger = logging.getLogger("poly-trade")
 
 
+ALL_STRATEGIES = [
+    "high_probability", "arbitrage", "btc_updown",
+    "safe_compounder", "sports_daily", "llm_crypto",
+]
+
+
 class Bot:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
         self.engine: TradingEngine | None = None
+        self._lock_files: list = []
 
     def build(self) -> "Bot":
         s = self.settings
@@ -95,7 +105,7 @@ class Bot:
 
         # Core
         balance_mgr = BalanceManager(s)
-        position_tracker = PositionTracker(trade_log)
+        position_tracker = PositionTracker(trade_log, paper_mode=s.paper_trading)
         order_manager = OrderManager(trade_log, s.max_open_positions)
 
         self.engine = TradingEngine(
@@ -115,12 +125,44 @@ class Bot:
         )
         return self
 
+    def _acquire_strategy_locks(self):
+        strategies = self.settings.only_strategies or ALL_STRATEGIES
+        lock_dir = Path("data/locks")
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        for name in sorted(strategies):
+            lock_path = lock_dir / f"{name}.lock"
+            f = open(lock_path, "w")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                # Release any locks already acquired
+                self._release_strategy_locks()
+                f.close()
+                logger.error(f"{name} is already running in another session")
+                sys.exit(1)
+            self._lock_files.append(f)
+        locked = ", ".join(sorted(strategies))
+        logger.info(f"Strategy locks acquired: {locked}")
+
+    def _release_strategy_locks(self):
+        for f in self._lock_files:
+            try:
+                fcntl.flock(f, fcntl.LOCK_UN)
+                f.close()
+            except Exception:
+                pass
+        self._lock_files.clear()
+
     def run(self):
         if not self.engine:
             self.build()
-        mode = "PAPER" if self.settings.paper_trading else "LIVE"
-        logger.info(f"Bot starting in {mode} mode | capital=${self.settings.starting_capital} -> ${self.settings.target_balance}")
-        self.engine.start()
+        self._acquire_strategy_locks()
+        try:
+            mode = "PAPER" if self.settings.paper_trading else "LIVE"
+            logger.info(f"Bot starting in {mode} mode | capital=${self.settings.starting_capital} -> ${self.settings.target_balance}")
+            self.engine.start()
+        finally:
+            self._release_strategy_locks()
 
     def stop(self):
         if self.engine:

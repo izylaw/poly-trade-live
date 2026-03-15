@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS positions (
     status TEXT NOT NULL DEFAULT 'open',
     opened_at TEXT NOT NULL,
     closed_at TEXT,
-    realized_pnl REAL
+    realized_pnl REAL,
+    paper_trade INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS daily_snapshots (
