@@ -60,6 +60,8 @@ class SportsDailyStrategy(Strategy):
         self.imbalance_threshold = settings.sports_daily_imbalance_threshold
         self.maker_cushion = settings.sports_daily_maker_cushion
         self.min_edge = settings.sports_daily_min_edge
+        self.max_spread = settings.sports_daily_max_spread
+        self.min_book_depth = settings.sports_daily_min_book_depth
         self.tags_to_search = settings.sports_daily_tags
         self._pending_predictions: list[dict] = []
 
@@ -91,6 +93,12 @@ class SportsDailyStrategy(Strategy):
             except Exception as e:
                 q = market.get("question", "?")[:60]
                 logger.warning(f"sports_daily: error analyzing '{q}': {e}")
+
+        if not signals and sports_markets:
+            logger.info(
+                f"sports_daily: 0 signals from {len(sports_markets)} markets "
+                f"(check book depth and spread filters)"
+            )
 
         signals.sort(key=lambda s: s.expected_value, reverse=True)
         return signals
@@ -245,6 +253,8 @@ class SportsDailyStrategy(Strategy):
         imbalance_0 = self._compute_book_imbalance(books.get(0))
         imbalance_1 = self._compute_book_imbalance(books.get(1))
 
+        volume = float(market.get("volume", 0) or 0)
+        liquidity = float(market.get("liquidity", 0) or 0)
         hours_remaining = market.get("_hours_remaining", 24.0)
 
         signals = []
@@ -256,6 +266,18 @@ class SportsDailyStrategy(Strategy):
             spread = spread_0 if i == 0 else spread_1
             imbalance = imbalance_0 if i == 0 else imbalance_1
             book = books.get(i)
+
+            # Gate: skip empty/illiquid books and excessively wide spreads
+            if spread > self.max_spread:
+                logger.debug(
+                    f"sports_daily: skip {outcome} '{question[:40]}' spread={spread:.2f} > max={self.max_spread}"
+                )
+                continue
+            if not self._is_book_liquid(book, self.min_book_depth):
+                logger.debug(
+                    f"sports_daily: skip {outcome} '{question[:40]}' book too thin"
+                )
+                continue
 
             pred = {
                 "strategy": self.name,
@@ -275,6 +297,7 @@ class SportsDailyStrategy(Strategy):
             sig = self._spread_capture_signal(
                 market_id, token_id, question, outcome,
                 bid, ask, mid, spread, book, hours_remaining,
+                volume=volume, liquidity=liquidity,
             )
             if sig:
                 pred["traded"] = True
@@ -288,6 +311,7 @@ class SportsDailyStrategy(Strategy):
             sig = self._book_imbalance_signal(
                 market_id, token_id, question, outcome,
                 bid, ask, mid, imbalance, book, hours_remaining,
+                volume=volume, liquidity=liquidity,
             )
             if sig:
                 pred["traded"] = True
@@ -317,6 +341,7 @@ class SportsDailyStrategy(Strategy):
     def _spread_capture_signal(
         self, market_id, token_id, question, outcome,
         bid, ask, mid, spread, book, hours_remaining,
+        volume=0.0, liquidity=0.0,
     ) -> TradeSignal | None:
         """Generate signal when spread is wide enough to capture."""
         if spread < self.min_spread:
@@ -334,8 +359,11 @@ class SportsDailyStrategy(Strategy):
         if edge < self.min_edge:
             return None
 
-        # Confidence = midpoint (implied probability)
-        confidence = mid
+        # Confidence: midpoint + bonuses for volume, liquidity, spread quality
+        vol_bonus = min(volume / 20000, 1.0) * 0.05
+        liq_bonus = min(liquidity / 10000, 1.0) * 0.03
+        spread_quality = max(0, 1.0 - spread / 0.20) * 0.02
+        confidence = min(mid + vol_bonus + liq_bonus + spread_quality, 0.95)
         ev = confidence * (1.0 - our_bid) - (1.0 - confidence) * our_bid
 
         if ev <= 0:
@@ -366,11 +394,13 @@ class SportsDailyStrategy(Strategy):
             order_type="GTC",
             post_only=True,
             cancel_after_ts=cancel_ts,
+            resolution_ts=cancel_ts + 300,  # cancel_ts is 5min before resolution
         )
 
     def _book_imbalance_signal(
         self, market_id, token_id, question, outcome,
         bid, ask, mid, imbalance, book, hours_remaining,
+        volume=0.0, liquidity=0.0,
     ) -> TradeSignal | None:
         """Generate signal when order book is heavily skewed (informed flow)."""
         if abs(imbalance) < self.imbalance_threshold:
@@ -381,9 +411,11 @@ class SportsDailyStrategy(Strategy):
         if imbalance <= 0:
             return None  # only follow positive imbalance (bid side heavier)
 
-        # Adjusted probability: midpoint + boost from imbalance
-        boost = imbalance * 0.05  # up to 5% probability boost
-        adjusted_prob = min(mid + boost, 0.95)
+        # Adjusted probability: midpoint + boost from imbalance + vol/liq bonuses
+        boost = imbalance * 0.10  # up to 10% probability boost
+        vol_bonus = min(volume / 20000, 1.0) * 0.03
+        liq_bonus = min(liquidity / 10000, 1.0) * 0.02
+        adjusted_prob = min(mid + boost + vol_bonus + liq_bonus, 0.95)
 
         our_bid = round(adjusted_prob - self.maker_cushion, 2)
         if our_bid <= bid:
@@ -418,6 +450,7 @@ class SportsDailyStrategy(Strategy):
             order_type="GTC",
             post_only=True,
             cancel_after_ts=cancel_ts,
+            resolution_ts=cancel_ts + 300,
         )
 
     def _favorite_value_signal(
@@ -475,9 +508,33 @@ class SportsDailyStrategy(Strategy):
             order_type="GTC",
             post_only=True,
             cancel_after_ts=cancel_ts,
+            resolution_ts=cancel_ts + 300,
         )
 
     # --- Helpers ---
+
+    @staticmethod
+    def _is_book_liquid(book, min_depth: float) -> bool:
+        """Check if both sides of the book have sufficient dollar depth."""
+        if book is None:
+            return False
+
+        bid_depth = 0.0
+        ask_depth = 0.0
+        if hasattr(book, 'bids') and book.bids:
+            for level in book.bids[:5]:
+                try:
+                    bid_depth += float(level.size) * float(level.price)
+                except (AttributeError, ValueError):
+                    pass
+        if hasattr(book, 'asks') and book.asks:
+            for level in book.asks[:5]:
+                try:
+                    ask_depth += float(level.size) * float(level.price)
+                except (AttributeError, ValueError):
+                    pass
+
+        return bid_depth >= min_depth and ask_depth >= min_depth
 
     @staticmethod
     def _compute_book_imbalance(book) -> float:

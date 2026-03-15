@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     min_trade_size: float = DEFAULTS["min_trade_size"]
     consecutive_loss_pause: int = DEFAULTS["consecutive_loss_pause"]
     max_positions_per_market: int = DEFAULTS["max_positions_per_market"]
+    high_prob_max_positions: int = DEFAULTS["high_prob_max_positions"]
+    btc_updown_max_positions: int = DEFAULTS["btc_updown_max_positions"]
+    llm_max_positions: int = DEFAULTS["llm_max_positions"]
+    max_long_term_positions: int = DEFAULTS["max_long_term_positions"]
+    long_term_threshold_days: int = DEFAULTS["long_term_threshold_days"]
 
     # Market filter
     min_volume_24h: float = DEFAULTS["min_volume_24h"]
@@ -55,6 +60,11 @@ class Settings(BaseSettings):
     high_prob_longshot_conf_multiplier: float = DEFAULTS["high_prob_longshot_conf_multiplier"]
     high_prob_maker_ttl_hours: int = DEFAULTS["high_prob_maker_ttl_hours"]
     arb_min_spread: float = DEFAULTS["arb_min_spread"]
+    arb_fee_rate: float = DEFAULTS["arb_fee_rate"]
+    arb_min_event_markets: int = DEFAULTS["arb_min_event_markets"]
+    arb_min_event_spread: float = DEFAULTS["arb_min_event_spread"]
+    arb_max_event_legs: int = DEFAULTS["arb_max_event_legs"]
+    arb_mono_min_spread: float = DEFAULTS["arb_mono_min_spread"]
 
     # Strategy selection
     only_strategies: list[str] = DEFAULTS["only_strategies"]
@@ -95,6 +105,8 @@ class Settings(BaseSettings):
     sports_daily_imbalance_threshold: float = DEFAULTS["sports_daily_imbalance_threshold"]
     sports_daily_maker_cushion: float = DEFAULTS["sports_daily_maker_cushion"]
     sports_daily_min_edge: float = DEFAULTS["sports_daily_min_edge"]
+    sports_daily_max_spread: float = DEFAULTS["sports_daily_max_spread"]
+    sports_daily_min_book_depth: float = DEFAULTS["sports_daily_min_book_depth"]
     sports_daily_max_positions: int = DEFAULTS["sports_daily_max_positions"]
     sports_daily_max_single_trade_pct: float = DEFAULTS["sports_daily_max_single_trade_pct"]
 
@@ -127,9 +139,6 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> Path:
-        if self.only_strategies:
-            suffix = "_".join(sorted(self.only_strategies))
-            return Path(f"data/poly_trade_{suffix}.db")
         return Path("data/poly_trade.db")
 
     @property

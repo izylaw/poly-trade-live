@@ -1,7 +1,7 @@
 DEFAULTS = {
     "starting_capital": 10.0,
-    "target_balance": 20.0,
-    "target_days": 30,
+    "target_balance": 30.0,
+    "target_days": 60,
     "goal_start_date": "",  # ISO format (e.g. 2026-03-01T00:00:00+00:00), empty = auto-detect
     "paper_trading": True,
     "polygon_rpc_url": "https://polygon-rpc.com",
@@ -11,21 +11,26 @@ DEFAULTS = {
     "hard_floor_pct": 0.20,
     "max_single_trade_pct": 0.10,
     "max_portfolio_exposure_pct": 0.60,
-    "max_open_positions": 7,
+    "max_open_positions": 20,
     "daily_loss_limit_pct": 0.15,
     "min_trade_size": 0.50,
     "consecutive_loss_pause": 3,
     "max_positions_per_market": 1,
+    "high_prob_max_positions": 8,
+    "btc_updown_max_positions": 3,
+    "llm_max_positions": 2,
+    "max_long_term_positions": 5,
+    "long_term_threshold_days": 7,
 
     # Market filter defaults
     "min_volume_24h": 500.0,
     "min_liquidity": 250.0,
     "max_spread": 0.05,
     "min_time_to_resolution_hours": 0.5,
-    "max_markets": 500,
+    "max_markets": 0,  # 0 = no cap (quality filters are the real gate)
 
     # Scanner defaults
-    "scanner_max_event_pages": 30,
+    "scanner_max_event_pages": 100,
     "scanner_clob_cross_ref": False,
     "scanner_clob_ttl": 1800,
 
@@ -41,6 +46,11 @@ DEFAULTS = {
     "high_prob_longshot_conf_multiplier": 2.0,
     "high_prob_maker_ttl_hours": 4,
     "arb_min_spread": 0.005,
+    "arb_fee_rate": 0.0625,
+    "arb_min_event_markets": 3,
+    "arb_min_event_spread": 0.02,
+    "arb_max_event_legs": 6,
+    "arb_mono_min_spread": 0.01,
 
     # Strategy selection
     "only_strategies": [],  # empty = all strategies enabled
@@ -81,7 +91,9 @@ DEFAULTS = {
     "sports_daily_imbalance_threshold": 0.30,
     "sports_daily_maker_cushion": 0.02,
     "sports_daily_min_edge": 0.02,
-    "sports_daily_max_positions": 5,
+    "sports_daily_max_spread": 0.40,
+    "sports_daily_min_book_depth": 50.0,
+    "sports_daily_max_positions": 4,
     "sports_daily_max_single_trade_pct": 0.05,
 
     # LLM Crypto strategy
