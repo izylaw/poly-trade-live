@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     sports_daily_imbalance_threshold: float = DEFAULTS["sports_daily_imbalance_threshold"]
     sports_daily_maker_cushion: float = DEFAULTS["sports_daily_maker_cushion"]
     sports_daily_min_edge: float = DEFAULTS["sports_daily_min_edge"]
+    sports_daily_max_spread: float = DEFAULTS["sports_daily_max_spread"]
+    sports_daily_min_book_depth: float = DEFAULTS["sports_daily_min_book_depth"]
     sports_daily_max_positions: int = DEFAULTS["sports_daily_max_positions"]
     sports_daily_max_single_trade_pct: float = DEFAULTS["sports_daily_max_single_trade_pct"]
 
@@ -137,9 +139,6 @@ class Settings(BaseSettings):
 
     @property
     def db_path(self) -> Path:
-        if self.only_strategies:
-            suffix = "_".join(sorted(self.only_strategies))
-            return Path(f"data/poly_trade_{suffix}.db")
         return Path("data/poly_trade.db")
 
     @property
