@@ -106,9 +106,14 @@ class SportsDailyStrategy(Strategy):
             try:
                 events = self.gamma.get_all_events_by_tag(tag)
                 for event in events:
+                    title = event.get("title", "")
+                    slug = event.get("slug", "")
+                    tags = event.get("tags", [])
+                    if not self._is_sports_event(title, slug, tags):
+                        continue
                     for m in event.get("markets", []):
-                        m["_event_title"] = event.get("title", "")
-                        m["_event_slug"] = event.get("slug", "")
+                        m["_event_title"] = title
+                        m["_event_slug"] = slug
                         all_markets.append(m)
             except Exception as e:
                 logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
