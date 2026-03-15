@@ -1,9 +1,19 @@
 import logging
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams, BookParams, OrderArgs, OrderType
 from src.config.settings import Settings
 from src.utils.retry import retry
+
+# py-clob-client uses a module-level httpx.Client with no timeout, which can
+# hang indefinitely on CLOB API slowness.  Patch it with a 30s timeout.
+try:
+    import py_clob_client.http_helpers.helpers as _clob_helpers
+    import httpx as _httpx
+    _clob_helpers._http_client = _httpx.Client(http2=True, timeout=30.0)
+except Exception:
+    pass
 
 logger = logging.getLogger("poly-trade")
 
@@ -71,28 +81,62 @@ class PolymarketClobClient:
         return {"bid": best_bid, "ask": best_ask, "mid": mid}
 
     def get_orderbooks_batch(self, token_ids: list[str], chunk_size: int = 50) -> dict[str, dict | None]:
-        """Fetch orderbooks for many token IDs in batched POST requests.
+        """Fetch orderbooks for many token IDs in parallel batched POST requests.
 
         Returns dict mapping token_id -> {"bid", "ask", "mid"} or None.
         """
+        import time as _time
+
         client = self._get_client()
         result: dict[str, dict | None] = {}
+        chunks = [token_ids[i : i + chunk_size] for i in range(0, len(token_ids), chunk_size)]
 
-        for i in range(0, len(token_ids), chunk_size):
-            chunk = token_ids[i : i + chunk_size]
-            try:
-                params = [BookParams(token_id=tid) for tid in chunk]
-                books = client.get_order_books(params)
-                for book in books:
-                    tid = book.asset_id
-                    if tid is None:
-                        continue
-                    best_bid = float(book.bids[0].price) if book.bids else 0.0
-                    best_ask = float(book.asks[0].price) if book.asks else 1.0
-                    mid = (best_bid + best_ask) / 2 if best_bid and best_ask != 1.0 else best_bid or best_ask
-                    result[tid] = {"bid": best_bid, "ask": best_ask, "mid": mid}
-            except Exception as e:
-                logger.warning(f"Batch orderbook chunk failed ({len(chunk)} tokens): {e}")
+        def _fetch_chunk(chunk: list[str]) -> dict[str, dict]:
+            chunk_result = {}
+            params = [BookParams(token_id=tid) for tid in chunk]
+            books = client.get_order_books(params)
+            for book in books:
+                tid = book.asset_id
+                if tid is None:
+                    continue
+                best_bid = float(book.bids[0].price) if book.bids else 0.0
+                best_ask = float(book.asks[0].price) if book.asks else 1.0
+                mid = (best_bid + best_ask) / 2 if best_bid and best_ask != 1.0 else best_bid or best_ask
+                chunk_result[tid] = {"bid": best_bid, "ask": best_ask, "mid": mid}
+            return chunk_result
+
+        def _fetch_chunk_with_retry(chunk: list[str], max_attempts: int = 3) -> dict[str, dict]:
+            for attempt in range(max_attempts):
+                try:
+                    return _fetch_chunk(chunk)
+                except Exception as e:
+                    if attempt < max_attempts - 1:
+                        delay = 1.0 * (2 ** attempt)
+                        logger.warning(
+                            f"Batch orderbook chunk ({len(chunk)} tokens) attempt {attempt + 1} "
+                            f"failed: {e}. Retrying in {delay}s"
+                        )
+                        _time.sleep(delay)
+                    else:
+                        raise
+
+        if len(chunks) <= 1:
+            # Single chunk — no threading overhead
+            if chunks:
+                try:
+                    result = _fetch_chunk_with_retry(chunks[0])
+                except Exception as e:
+                    logger.warning(f"Batch orderbook chunk failed ({len(chunks[0])} tokens): {e}")
+        else:
+            workers = min(len(chunks), 6)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_fetch_chunk_with_retry, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    try:
+                        result.update(future.result())
+                    except Exception as e:
+                        logger.warning(f"Batch orderbook chunk failed ({len(chunk)} tokens): {e}")
 
         logger.info(
             f"Batch orderbooks: {len(result)}/{len(token_ids)} tokens returned data"
