@@ -161,8 +161,8 @@ class TradingEngine:
                     except Exception as e:
                         logger.debug(f"Failed to log prediction: {e}")
 
-        # Resolve past predictions and open positions (every 5th cycle)
-        if self._cycle_count % 5 == 0:
+        # Resolve past predictions and open positions (first cycle + every 5th)
+        if self._cycle_count == 1 or self._cycle_count % 5 == 0:
             self._resolve_predictions()
             self._resolve_positions()
 
