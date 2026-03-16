@@ -56,10 +56,10 @@ DEFAULTS = {
     "only_strategies": [],  # empty = all strategies enabled
 
     # BTC Up/Down strategy (v2 — price delta model)
-    "btc_updown_assets": ["BTC", "ETH", "SOL"],
+    "btc_updown_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
     "btc_updown_intervals": ["5m", "15m", "1h"],
-    "btc_updown_min_edge": 0.05,          # min (est_prob - ask) to trade
-    "btc_updown_5m_vol": 0.0010,          # BTC 5-min volatility (0.10%)
+    "btc_updown_min_edge": 0.03,          # min (est_prob - ask) to trade
+    "btc_updown_5m_vol": 0.0025,          # mixed-crypto 5-min volatility baseline
     "btc_updown_logistic_k": 1.5,         # logistic steepness
     "btc_updown_momentum_weight": 0.3,    # momentum confirmation weight
     "btc_updown_min_ask": 0.03,           # min ask price to consider

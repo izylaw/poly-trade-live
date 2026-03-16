@@ -1,6 +1,7 @@
 import time
 import logging
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from src.utils.retry import retry
@@ -8,7 +9,7 @@ from src.utils.retry import retry
 logger = logging.getLogger("poly-trade")
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
-ASSET_NAMES = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "xrp"}
+ASSET_NAMES = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "xrp", "DOGE": "dogecoin", "BNB": "bnb"}
 
 
 class GammaClient:
@@ -230,6 +231,19 @@ class GammaClient:
     # Interval durations in seconds for slug construction
     INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 
+    @staticmethod
+    def _hourly_slug(asset: str, ts: int) -> str:
+        """Build human-readable 1h slug like 'bitcoin-up-or-down-march-15-2026-9pm-et'."""
+        coin = ASSET_NAMES.get(asset.upper(), asset.lower())
+        et = ZoneInfo("America/New_York")
+        dt = datetime.fromtimestamp(ts, tz=et)
+        month = dt.strftime("%B").lower()
+        day = dt.day
+        year = dt.year
+        hour_12 = dt.strftime("%I").lstrip("0")  # 1-12, no leading zero
+        ampm = dt.strftime("%p").lower()
+        return f"{coin}-up-or-down-{month}-{day}-{year}-{hour_12}{ampm}-et"
+
     def get_crypto_updown_markets(self, asset: str, interval: str) -> list[dict]:
         """Fetch crypto up/down markets by constructing event slugs.
 
@@ -248,7 +262,10 @@ class GammaClient:
         # Check a few past slots and upcoming slots
         for i in range(-2, 6):
             ts = base + i * interval_secs
-            slug = f"{asset.lower()}-updown-{interval}-{ts}"
+            if interval == "1h":
+                slug = self._hourly_slug(asset, ts)
+            else:
+                slug = f"{asset.lower()}-updown-{interval}-{ts}"
             markets = self._fetch_event_markets(slug, ts)
             all_markets.extend(markets)
 

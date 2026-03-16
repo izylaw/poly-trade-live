@@ -13,6 +13,8 @@ ASSET_SYMBOLS = {
     "ETH": "ETHUSDT",
     "SOL": "SOLUSDT",
     "XRP": "XRPUSDT",
+    "DOGE": "DOGEUSDT",
+    "BNB": "BNBUSDT",
 }
 
 
