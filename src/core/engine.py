@@ -271,7 +271,7 @@ class TradingEngine:
                 continue
 
             try:
-                result = self._gamma.get_market_resolution(market_id)
+                result = self._gamma.get_market_resolution(market_id, token_id=pos.get("token_id", ""))
             except Exception as e:
                 logger.debug(f"Failed to check resolution for position #{pos['id']}: {e}")
                 continue

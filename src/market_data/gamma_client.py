@@ -302,7 +302,7 @@ class GammaClient:
         return markets
 
     @retry(max_attempts=3)
-    def get_market(self, condition_id: str) -> dict | None:
+    def get_market(self, condition_id: str, token_id: str = "") -> dict | None:
         # Gamma /markets/{id} expects numeric ID, not conditionId hash.
         # Use query param for hex conditionIds (0x...).
         if condition_id.startswith("0x"):
@@ -312,22 +312,42 @@ class GammaClient:
                 timeout=15,
             )
             if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            results = resp.json()
-            return results[0] if results else None
+                pass  # fall through to token_id fallback
+            else:
+                resp.raise_for_status()
+                results = resp.json()
+                # Validate the returned market actually matches our conditionId
+                # (Gamma's condition_id filter is unreliable and may return wrong markets)
+                for m in results or []:
+                    if m.get("conditionId") == condition_id:
+                        return m
+
+            # Fallback: look up by CLOB token ID (more reliable)
+            if token_id:
+                resp = requests.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={"clob_token_ids": token_id},
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    results = resp.json()
+                    if results:
+                        return results[0]
+
+            logger.debug(f"Gamma: no market found for conditionId {condition_id[:20]}...")
+            return None
         resp = requests.get(f"{GAMMA_API_URL}/markets/{condition_id}", timeout=15)
         if resp.status_code in (404, 422):
             return None
         resp.raise_for_status()
         return resp.json()
 
-    def get_market_resolution(self, condition_id: str) -> dict | None:
+    def get_market_resolution(self, condition_id: str, token_id: str = "") -> dict | None:
         """Check if a market has resolved and return the winning outcome.
 
         Returns dict with 'resolved' bool and 'winning_outcome' str, or None on error.
         """
-        market = self.get_market(condition_id)
+        market = self.get_market(condition_id, token_id=token_id)
         if market is None:
             return None
 
