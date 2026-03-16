@@ -1,17 +1,24 @@
 import logging
 import random
+import time
 from datetime import datetime, timezone
 from src.risk.risk_manager import ApprovedTrade
 from src.storage.trade_log import TradeLog
+
+
+def _is_long_term(resolution_ts: float, threshold_days: int) -> bool:
+    return resolution_ts > 0 and resolution_ts - time.time() > threshold_days * 86400
 
 logger = logging.getLogger("poly-trade")
 
 
 class PaperExecutor:
-    def __init__(self, starting_balance: float, trade_log: TradeLog, max_open_positions: int = 10):
+    def __init__(self, starting_balance: float, trade_log: TradeLog, max_open_positions: int = 10,
+                 long_term_threshold_days: int = 7):
         self.starting_balance = starting_balance
         self.trade_log = trade_log
         self.max_open_positions = max_open_positions
+        self.long_term_threshold_days = long_term_threshold_days
 
     def execute(self, trade: ApprovedTrade) -> dict:
         if trade.signal.post_only:
@@ -64,6 +71,7 @@ class PaperExecutor:
             "market_question": trade.signal.market_question,
             "strategy": trade.signal.strategy,
             "confidence": trade.signal.confidence,
+            "slug": trade.signal.slug,
         }
 
     def _execute_taker(self, trade: ApprovedTrade) -> dict:
@@ -108,6 +116,9 @@ class PaperExecutor:
             "cost": round(actual_cost, 4),
             "trade_id": trade_id,
             "paper_trade": True,
+            "resolution_ts": trade.signal.resolution_ts,
+            "is_long_term": 1 if _is_long_term(trade.signal.resolution_ts, self.long_term_threshold_days) else 0,
+            "slug": trade.signal.slug,
         }
         pos_id = self.trade_log.save_position(position)
 
@@ -119,13 +130,18 @@ class PaperExecutor:
 
     def fill_order(self, order: dict) -> dict:
         """Called by order_manager when probabilistic fill triggers."""
-        if len(self.trade_log.get_open_positions(paper_trade=True)) >= self.max_open_positions:
-            logger.info(f"Paper: rejected fill — {self.max_open_positions} positions already open")
-            return {"status": "rejected", "reason": "max_positions_reached"}
+        open_positions = self.trade_log.get_open_positions(paper_trade=True)
+        is_arb = order.get("strategy") == "arbitrage"
+        if not is_arb:
+            non_arb = [p for p in open_positions if p.get("strategy") != "arbitrage"]
+            if len(non_arb) >= self.max_open_positions:
+                logger.info(f"Paper: rejected fill — {self.max_open_positions} positions already open")
+                return {"status": "rejected", "reason": "max_positions_reached"}
 
         fill_price = order["fill_price"]
         actual_cost = order["size"] * fill_price
 
+        resolution_ts = order.get("resolution_ts", 0)
         position = {
             "market_id": order["market_id"],
             "token_id": order["token_id"],
@@ -137,6 +153,9 @@ class PaperExecutor:
             "cost": round(actual_cost, 4),
             "trade_id": order["trade_id"],
             "paper_trade": True,
+            "resolution_ts": resolution_ts,
+            "is_long_term": 1 if _is_long_term(resolution_ts, self.long_term_threshold_days) else 0,
+            "slug": order.get("slug", ""),
         }
         pos_id = self.trade_log.save_position(position)
 

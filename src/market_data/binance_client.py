@@ -1,3 +1,4 @@
+import threading
 import time
 import logging
 import requests
@@ -12,6 +13,8 @@ ASSET_SYMBOLS = {
     "ETH": "ETHUSDT",
     "SOL": "SOLUSDT",
     "XRP": "XRPUSDT",
+    "DOGE": "DOGEUSDT",
+    "BNB": "BNBUSDT",
 }
 
 
@@ -19,16 +22,19 @@ class BinanceClient:
     def __init__(self, cache_ttl: float = 10.0):
         self._cache: dict[str, tuple[float, any]] = {}
         self._cache_ttl = cache_ttl
+        self._lock = threading.Lock()
 
     def _get_cached(self, key: str):
-        if key in self._cache:
-            ts, data = self._cache[key]
-            if time.time() - ts < self._cache_ttl:
-                return data
+        with self._lock:
+            if key in self._cache:
+                ts, data = self._cache[key]
+                if time.time() - ts < self._cache_ttl:
+                    return data
         return None
 
     def _set_cache(self, key: str, data):
-        self._cache[key] = (time.time(), data)
+        with self._lock:
+            self._cache[key] = (time.time(), data)
 
     @staticmethod
     def _symbol(asset: str) -> str:

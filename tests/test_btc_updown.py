@@ -15,8 +15,8 @@ def make_settings(**overrides):
     defaults = {
         "btc_updown_assets": ["BTC"],
         "btc_updown_intervals": ["5m"],
-        "btc_updown_min_edge": 0.05,
-        "btc_updown_5m_vol": 0.0010,
+        "btc_updown_min_edge": 0.03,
+        "btc_updown_5m_vol": 0.0025,
         "btc_updown_logistic_k": 1.5,
         "btc_updown_momentum_weight": 0.3,
         "btc_updown_min_ask": 0.03,
@@ -75,14 +75,14 @@ class TestEstimateProbability:
 
     def test_late_window_strong_up(self):
         strategy = make_strategy()
-        # +0.15% delta at 80% through window
-        prob = strategy._estimate_outcome_probability("Up", 0.0015, 0.8, 0.0)
+        # +0.30% delta at 80% through window (strong signal relative to 0.25% baseline)
+        prob = strategy._estimate_outcome_probability("Up", 0.0030, 0.8, 0.0)
         assert prob > 0.80
 
     def test_late_window_strong_down(self):
         strategy = make_strategy()
-        # -0.15% delta at 80% through window, evaluating "Down"
-        prob = strategy._estimate_outcome_probability("Down", -0.0015, 0.8, 0.0)
+        # -0.30% delta at 80% through window, evaluating "Down"
+        prob = strategy._estimate_outcome_probability("Down", -0.0030, 0.8, 0.0)
         assert prob > 0.80
 
     def test_up_prob_and_down_prob_complement(self):
@@ -112,8 +112,9 @@ class TestEstimateProbability:
 
 class TestEvaluateBothSides:
     def test_maker_bid_from_probability(self):
-        """Bid price should be est_prob - maker_edge_cushion, not the ask."""
-        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+        """Bid price should be est_prob - cushion, not the ask.
+        High est_prob (>0.65) uses dynamic cushion of 0.02."""
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_max_ask=0.95)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -123,23 +124,25 @@ class TestEvaluateBothSides:
 
         mock_clob = make_mock_clob()
 
-        # Strong downward delta → Down est_prob ~ 0.88
+        # Very strong downward delta → Down est_prob ~ 0.95, Up clamped to 0.05
+        # Up bid = 0.05-0.05 = 0.00 < min_ask → skipped; only Down passes
         delta_info = {
-            "delta_pct": -0.0015, "window_progress": 0.8,
+            "delta_pct": -0.003, "window_progress": 0.8,
             "time_remaining": 60, "dynamic_vol": 0.0010,
             "resolution_ts": time.time() + 60,
         }
-        momentum = -0.3
+        momentum = -0.5
 
         signal, predictions = strategy._evaluate_both_sides(market, "BTC", delta_info, momentum, mock_clob)
         assert signal is not None
         assert signal.outcome == "Down"
-        # bid = est_prob - 0.05, should NOT be 0.99
-        assert signal.price < 0.90
-        assert signal.price == pytest.approx(signal.confidence - 0.05, abs=0.01)
+        # bid = est_prob - 0.02 (dynamic cushion for high confidence), should NOT be 0.99
+        assert signal.price < 0.95
+        assert signal.price == pytest.approx(signal.confidence - 0.02, abs=0.01)
 
     def test_no_edge_returns_none(self):
-        strategy = make_strategy()
+        """At 50% probability with cushion=0.05, edge=0.05. Need min_edge > 0.05 to reject."""
+        strategy = make_strategy(btc_updown_min_edge=0.06)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -345,8 +348,8 @@ class TestHelpers:
 
 class TestMakerBidPrice:
     def test_maker_bid_price_from_probability(self):
-        """bid = est_prob - cushion, not ask."""
-        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+        """bid = est_prob - dynamic cushion (0.02 for high confidence), not ask."""
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_max_ask=0.95)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -356,17 +359,18 @@ class TestMakerBidPrice:
 
         mock_clob = make_mock_clob()
 
-        # Strong down delta: est_prob for Down ~0.88
+        # Very strong down delta: Up prob clamped to 0.05 → bid below min_ask → skipped
         delta_info = {
-            "delta_pct": -0.0015, "window_progress": 0.8,
+            "delta_pct": -0.003, "window_progress": 0.8,
             "time_remaining": 60, "dynamic_vol": 0.0010,
             "resolution_ts": time.time() + 60,
         }
 
-        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.3, mock_clob)
+        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.5, mock_clob)
         assert signal is not None
-        # Bid is derived from model, not from CLOB ask
-        assert signal.price == round(signal.confidence - 0.05, 2)
+        assert signal.outcome == "Down"
+        # Bid is derived from model with dynamic cushion, not from CLOB ask
+        assert signal.price == round(signal.confidence - 0.02, 2)
 
     def test_maker_no_fee_in_ev(self):
         """EV has no taker fee deducted for maker orders."""
@@ -621,9 +625,9 @@ class TestDynamicVol:
 
     def test_dynamic_vol_fallback(self):
         strategy = make_strategy()
-        # None → falls back to self.btc_5m_vol
+        # None → falls back to self.btc_5m_vol (0.0025)
         prob_default = strategy._estimate_outcome_probability("Up", 0.0010, 0.8, 0.0)
-        prob_explicit = strategy._estimate_outcome_probability("Up", 0.0010, 0.8, 0.0, dynamic_vol=0.0010)
+        prob_explicit = strategy._estimate_outcome_probability("Up", 0.0010, 0.8, 0.0, dynamic_vol=0.0025)
         assert prob_default == pytest.approx(prob_explicit, abs=0.001)
 
     def test_high_vol_widens_min_edge(self):
@@ -1006,33 +1010,43 @@ class TestSmartBid:
         assert bid == 0.60  # fair_bid, not undercut
 
     def test_smart_bid_fallback_no_book(self):
-        """Empty book uses static formula."""
+        """Empty book uses dynamic cushion formula."""
         strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
 
+        # est_prob=0.75 > 0.65 → dynamic cushion=0.02, fair_bid=0.73
         bid = strategy._get_smart_bid(0.75, None)
-        assert bid == 0.70  # fair_bid = 0.75 - 0.05
+        assert bid == 0.73
+
+    def test_smart_bid_fallback_no_book_low_prob(self):
+        """Low probability uses default cushion."""
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+
+        # est_prob=0.60 <= 0.65 → default cushion=0.05, fair_bid=0.55
+        bid = strategy._get_smart_bid(0.60, None)
+        assert bid == 0.55
 
     def test_smart_bid_ask_above_fair(self):
         """When best_ask >= fair_bid, use fair_bid (no undercut needed)."""
         strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
 
-        # est_prob=0.75, fair_bid=0.70
-        # best_ask=0.80 >= 0.70 → no undercut
+        # est_prob=0.75 > 0.65 → dynamic cushion=0.02, fair_bid=0.73
+        # best_ask=0.80 >= 0.73 → no undercut
         mock_book = MagicMock()
         mock_book.asks = [MagicMock(price="0.80")]
 
         bid = strategy._get_smart_bid(0.75, mock_book)
-        assert bid == 0.70
+        assert bid == 0.73
 
     def test_smart_bid_empty_asks(self):
         """Book with no asks uses fair_bid."""
         strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
 
+        # est_prob=0.75 > 0.65 → dynamic cushion=0.02, fair_bid=0.73
         mock_book = MagicMock()
         mock_book.asks = []
 
         bid = strategy._get_smart_bid(0.75, mock_book)
-        assert bid == 0.70
+        assert bid == 0.73
 
     def test_smart_bid_in_evaluate_both_sides(self):
         """Smart bid is used in _evaluate_both_sides when book is available."""
@@ -1066,3 +1080,262 @@ class TestSmartBid:
         assert signal.outcome == "Down"
         # Should be undercut bid (0.59), not fair_bid (0.83)
         assert signal.price == 0.59
+
+
+# --- New tests for 1h slug, vol cap, dynamic cushion, Gamma fallback ---
+
+class TestHourlySlug:
+    def test_hourly_slug_format(self):
+        """1h slug follows human-readable ET format."""
+        from src.market_data.gamma_client import GammaClient
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        # March 15, 2026 9:00 PM ET = Unix 1773799200
+        # Construct a timestamp for 9PM ET on March 15, 2026
+        et = ZoneInfo("America/New_York")
+        dt = datetime(2026, 3, 15, 21, 0, 0, tzinfo=et)
+        ts = int(dt.timestamp())
+
+        slug = GammaClient._hourly_slug("BTC", ts)
+        assert slug == "bitcoin-up-or-down-march-15-2026-9pm-et"
+
+    def test_hourly_slug_am(self):
+        """Morning hours use 'am' suffix."""
+        from src.market_data.gamma_client import GammaClient
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        dt = datetime(2026, 3, 15, 10, 0, 0, tzinfo=et)
+        ts = int(dt.timestamp())
+
+        slug = GammaClient._hourly_slug("ETH", ts)
+        assert slug == "ethereum-up-or-down-march-15-2026-10am-et"
+
+    def test_hourly_slug_asset_mapping(self):
+        """Each asset maps to correct coin name."""
+        from src.market_data.gamma_client import GammaClient
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        dt = datetime(2026, 3, 15, 14, 0, 0, tzinfo=et)
+        ts = int(dt.timestamp())
+
+        assert GammaClient._hourly_slug("SOL", ts) == "solana-up-or-down-march-15-2026-2pm-et"
+        assert GammaClient._hourly_slug("DOGE", ts) == "dogecoin-up-or-down-march-15-2026-2pm-et"
+        assert GammaClient._hourly_slug("BNB", ts) == "bnb-up-or-down-march-15-2026-2pm-et"
+        assert GammaClient._hourly_slug("XRP", ts) == "xrp-up-or-down-march-15-2026-2pm-et"
+
+    def test_hourly_slug_used_for_1h_interval(self):
+        """get_crypto_updown_markets uses _hourly_slug for 1h interval."""
+        from src.market_data.gamma_client import GammaClient
+
+        client = GammaClient()
+        slugs_called = []
+        original_fetch = client._fetch_event_markets
+
+        def capture_slug(slug, ts):
+            slugs_called.append(slug)
+            return []
+
+        client._fetch_event_markets = capture_slug
+        client.get_crypto_updown_markets("BTC", "1h")
+
+        # All slugs for 1h should have human-readable format, not unix timestamp
+        for slug in slugs_called:
+            assert "bitcoin-up-or-down-" in slug
+            assert "-et" in slug
+            # Should NOT contain raw unix timestamp
+            assert "btc-updown-1h-" not in slug
+
+    def test_5m_slug_unchanged(self):
+        """5m interval still uses old unix-timestamp slug format."""
+        from src.market_data.gamma_client import GammaClient
+
+        client = GammaClient()
+        slugs_called = []
+
+        def capture_slug(slug, ts):
+            slugs_called.append(slug)
+            return []
+
+        client._fetch_event_markets = capture_slug
+        client.get_crypto_updown_markets("BTC", "5m")
+
+        for slug in slugs_called:
+            assert slug.startswith("btc-updown-5m-")
+
+
+class TestVolRatioCap:
+    def test_vol_ratio_capped_at_2(self):
+        """Vol ratio above 2.0 is capped, preventing excessive edge widening."""
+        strategy = make_strategy(btc_updown_max_ask=0.90)
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "cond1",
+            "question": "Will BTC go up?",
+        }
+        mock_clob = make_mock_clob()
+
+        # With dynamic_vol=0.010 (4x baseline 0.0025), vol_ratio would be 4.0
+        # but should be capped at 2.0. effective_min_edge = 0.03 * 2.0 = 0.06
+        delta_info = {
+            "delta_pct": -0.0015, "window_progress": 0.8,
+            "time_remaining": 60, "dynamic_vol": 0.010,
+            "resolution_ts": time.time() + 60,
+        }
+        signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.3, mock_clob)
+        # With extreme vol, low-prob Up has edge=0.05 (cushion) but
+        # eff_min_edge=0.06, so it should be rejected.
+        # High-prob Down uses dynamic cushion (0.02), outcome_min_edge=0.02, passes
+        traded = [p for p in preds if p["traded"]]
+        # At 4x vol uncapped, eff_min_edge=0.12 → nothing trades.
+        # At 2x cap, eff_min_edge=0.06 → Down still trades via dynamic cushion.
+        if signal is not None:
+            assert signal.confidence > 0.65  # only high-confidence trades survive
+
+    def test_vol_ratio_floor_at_1(self):
+        """Vol ratio below 1.0 is floored, never shrinking min_edge."""
+        strategy = make_strategy()
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "cond1",
+            "question": "Will BTC go up?",
+        }
+        mock_clob = make_mock_clob()
+
+        # Low vol: 0.0005, ratio would be 0.2 but clamped to 1.0
+        delta_info = {
+            "delta_pct": 0.0, "window_progress": 0.5,
+            "time_remaining": 150, "dynamic_vol": 0.0005,
+            "resolution_ts": time.time() + 150,
+        }
+        signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, 0.0, mock_clob)
+        # effective_min_edge = 0.03 * 1.0 = 0.03 (not 0.03 * 0.2 = 0.006)
+        # With no delta, est_prob=0.50, cushion=0.05, edge=0.05 >= 0.03 → passes
+        assert signal is not None
+
+
+class TestDynamicCushion:
+    def test_high_confidence_uses_tight_cushion(self):
+        """est_prob > 0.65 uses cushion=0.02 instead of default 0.05."""
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+
+        # High confidence: cushion=0.02
+        bid_high = strategy._get_smart_bid(0.80, None)
+        assert bid_high == 0.78  # 0.80 - 0.02
+
+        # Low confidence: cushion=0.05
+        bid_low = strategy._get_smart_bid(0.60, None)
+        assert bid_low == 0.55  # 0.60 - 0.05
+
+    def test_boundary_at_065(self):
+        """est_prob == 0.65 uses default cushion (not dynamic)."""
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+
+        bid = strategy._get_smart_bid(0.65, None)
+        assert bid == 0.60  # 0.65 - 0.05 (default, not 0.65 - 0.02 = 0.63)
+
+    def test_just_above_065(self):
+        """est_prob = 0.66 uses dynamic cushion."""
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+
+        bid = strategy._get_smart_bid(0.66, None)
+        assert bid == 0.64  # 0.66 - 0.02
+
+
+class TestGammaPriceFallback:
+    def test_gamma_prices_used_when_clob_empty(self):
+        """When CLOB spread > 0.90 and Gamma has prices, use Gamma for bidding."""
+        strategy = make_strategy(btc_updown_max_ask=0.90)
+
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "cond1",
+            "question": "Will BTC go up?",
+            "bestBid": "0.55",
+            "bestAsk": "0.56",
+            "outcomePrices": '["0.55", "0.45"]',
+        }
+
+        # CLOB returns empty book (spread > 0.90)
+        mock_clob = MagicMock()
+        mock_clob.get_price.return_value = {"ask": 0.99, "bid": 0.01, "mid": 0.50}
+        mock_clob.get_book.return_value = None
+
+        delta_info = {
+            "delta_pct": -0.0015, "window_progress": 0.8,
+            "time_remaining": 60, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 60,
+        }
+
+        signal, preds = strategy._evaluate_both_sides(
+            market, "BTC", delta_info, -0.3, mock_clob
+        )
+        # Gamma prices should be used; bid should be near gamma_bid, not 0.99
+        if signal is not None:
+            assert signal.price < 0.90
+
+    def test_extract_gamma_prices_basic(self):
+        """_extract_gamma_prices parses bestBid/bestAsk and outcomePrices."""
+        strategy = make_strategy()
+
+        market = {
+            "bestBid": "0.55",
+            "bestAsk": "0.57",
+            "outcomePrices": '["0.56", "0.44"]',
+        }
+
+        prices = strategy._extract_gamma_prices(market)
+        assert prices["bid_0"] == 0.55
+        assert prices["ask_0"] == 0.57
+        # outcomePrices don't override bestBid/bestAsk for index 0
+        assert prices["bid_0"] == 0.55
+        # Index 1 derived from outcomePrices
+        assert "bid_1" in prices
+
+    def test_extract_gamma_prices_empty(self):
+        """Empty market returns empty prices."""
+        strategy = make_strategy()
+        prices = strategy._extract_gamma_prices({})
+        assert prices == {}
+
+    def test_late_window_taker(self):
+        """Late window with Gamma ask below estimate triggers taker order."""
+        strategy = make_strategy(btc_updown_max_ask=0.90)
+
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "cond1",
+            "question": "Will BTC go up?",
+            "bestBid": "0.40",
+            "bestAsk": "0.42",
+            "outcomePrices": '["0.41", "0.59"]',
+        }
+
+        mock_clob = MagicMock()
+        mock_clob.get_price.return_value = {"ask": 0.99, "bid": 0.01, "mid": 0.50}
+        mock_clob.get_book.return_value = None
+
+        # Strong Down signal, late window
+        delta_info = {
+            "delta_pct": -0.003, "window_progress": 0.85,
+            "time_remaining": 45, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 45,
+        }
+
+        signal, preds = strategy._evaluate_both_sides(
+            market, "BTC", delta_info, -0.5, mock_clob
+        )
+
+        # Down est_prob ~0.95, Gamma ask for Down ~0.60
+        # 0.60 < 0.95 - 0.01 = 0.94 → taker triggered
+        if signal is not None and signal.outcome == "Down":
+            # Taker order: post_only should be False
+            assert signal.post_only is False

@@ -66,6 +66,10 @@ btc_updown_min_ask: 0.03
 btc_updown_max_ask: 0.85
 ```
 
+## Position Limits
+- Per-strategy cap: 3
+- Per-market limit: 2 (dual-side quoting requires both UP + DOWN on same market)
+
 ## Risk
 - Strategy-specific min_confidence: 0.55 (overrides aggression tuner)
 - Enabled in moderate, aggressive, and ultra aggression levels

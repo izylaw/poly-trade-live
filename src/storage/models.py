@@ -37,7 +37,10 @@ CREATE TABLE IF NOT EXISTS positions (
     opened_at TEXT NOT NULL,
     closed_at TEXT,
     realized_pnl REAL,
-    paper_trade INTEGER NOT NULL DEFAULT 1
+    paper_trade INTEGER NOT NULL DEFAULT 1,
+    resolution_ts REAL NOT NULL DEFAULT 0,
+    is_long_term INTEGER NOT NULL DEFAULT 0,
+    slug TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS daily_snapshots (

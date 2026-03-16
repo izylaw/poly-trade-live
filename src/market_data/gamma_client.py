@@ -1,6 +1,7 @@
 import time
 import logging
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from src.utils.retry import retry
@@ -8,7 +9,7 @@ from src.utils.retry import retry
 logger = logging.getLogger("poly-trade")
 
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
-ASSET_NAMES = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "xrp"}
+ASSET_NAMES = {"BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "XRP": "xrp", "DOGE": "dogecoin", "BNB": "bnb"}
 
 
 class GammaClient:
@@ -170,8 +171,78 @@ class GammaClient:
         self._set_cache(cache_key, data)
         return data
 
+    # Sports league → Gamma series_id mapping (from /sports endpoint)
+    SPORTS_SERIES = {
+        "nba": "10345",
+        "nfl": "10187",
+        "mlb": "3",
+        "nhl": "10346",
+        "ufc": "10500",
+        "mls": "10189",
+        "epl": "10188",
+        "soccer": "10188",  # alias
+    }
+
+    def get_sports_game_events(self, league: str, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Fetch active sports game events by league series_id."""
+        series_id = self.SPORTS_SERIES.get(league.lower())
+        if not series_id:
+            return []
+
+        cache_key = f"sports_games_{league}_{limit}_{offset}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            resp = requests.get(
+                f"{GAMMA_API_URL}/events",
+                params={"limit": limit, "offset": offset, "active": True,
+                        "closed": False, "series_id": series_id},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._set_cache(cache_key, data)
+            return data
+        except Exception as e:
+            logger.warning(f"Gamma sports games '{league}' fetch failed: {e}")
+            return []
+
+    def get_all_sports_game_events(self, league: str, max_pages: int = 10) -> list[dict]:
+        """Paginate sports game events for a league."""
+        cache_key = f"all_sports_games_{league}_{max_pages}"
+        cached = self._get_cached(cache_key, ttl=45.0)
+        if cached is not None:
+            return cached
+
+        all_events = []
+        for page in range(max_pages):
+            events = self.get_sports_game_events(league, limit=100, offset=page * 100)
+            if not events:
+                break
+            all_events.extend(events)
+
+        if all_events:
+            logger.info(f"Fetched {len(all_events)} game events for '{league}'")
+        self._set_cache(cache_key, all_events)
+        return all_events
+
     # Interval durations in seconds for slug construction
     INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
+
+    @staticmethod
+    def _hourly_slug(asset: str, ts: int) -> str:
+        """Build human-readable 1h slug like 'bitcoin-up-or-down-march-15-2026-9pm-et'."""
+        coin = ASSET_NAMES.get(asset.upper(), asset.lower())
+        et = ZoneInfo("America/New_York")
+        dt = datetime.fromtimestamp(ts, tz=et)
+        month = dt.strftime("%B").lower()
+        day = dt.day
+        year = dt.year
+        hour_12 = dt.strftime("%I").lstrip("0")  # 1-12, no leading zero
+        ampm = dt.strftime("%p").lower()
+        return f"{coin}-up-or-down-{month}-{day}-{year}-{hour_12}{ampm}-et"
 
     def get_crypto_updown_markets(self, asset: str, interval: str) -> list[dict]:
         """Fetch crypto up/down markets by constructing event slugs.
@@ -191,7 +262,10 @@ class GammaClient:
         # Check a few past slots and upcoming slots
         for i in range(-2, 6):
             ts = base + i * interval_secs
-            slug = f"{asset.lower()}-updown-{interval}-{ts}"
+            if interval == "1h":
+                slug = self._hourly_slug(asset, ts)
+            else:
+                slug = f"{asset.lower()}-updown-{interval}-{ts}"
             markets = self._fetch_event_markets(slug, ts)
             all_markets.extend(markets)
 
@@ -228,7 +302,7 @@ class GammaClient:
         return markets
 
     @retry(max_attempts=3)
-    def get_market(self, condition_id: str) -> dict | None:
+    def get_market(self, condition_id: str, token_id: str = "") -> dict | None:
         # Gamma /markets/{id} expects numeric ID, not conditionId hash.
         # Use query param for hex conditionIds (0x...).
         if condition_id.startswith("0x"):
@@ -238,22 +312,42 @@ class GammaClient:
                 timeout=15,
             )
             if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            results = resp.json()
-            return results[0] if results else None
+                pass  # fall through to token_id fallback
+            else:
+                resp.raise_for_status()
+                results = resp.json()
+                # Validate the returned market actually matches our conditionId
+                # (Gamma's condition_id filter is unreliable and may return wrong markets)
+                for m in results or []:
+                    if m.get("conditionId") == condition_id:
+                        return m
+
+            # Fallback: look up by CLOB token ID (more reliable)
+            if token_id:
+                resp = requests.get(
+                    f"{GAMMA_API_URL}/markets",
+                    params={"clob_token_ids": token_id},
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    results = resp.json()
+                    if results:
+                        return results[0]
+
+            logger.debug(f"Gamma: no market found for conditionId {condition_id[:20]}...")
+            return None
         resp = requests.get(f"{GAMMA_API_URL}/markets/{condition_id}", timeout=15)
         if resp.status_code in (404, 422):
             return None
         resp.raise_for_status()
         return resp.json()
 
-    def get_market_resolution(self, condition_id: str) -> dict | None:
+    def get_market_resolution(self, condition_id: str, token_id: str = "") -> dict | None:
         """Check if a market has resolved and return the winning outcome.
 
         Returns dict with 'resolved' bool and 'winning_outcome' str, or None on error.
         """
-        market = self.get_market(condition_id)
+        market = self.get_market(condition_id, token_id=token_id)
         if market is None:
             return None
 

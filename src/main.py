@@ -20,20 +20,25 @@ def cli():
 
 @cli.command()
 @click.option("--paper/--live", default=True, help="Paper or live trading mode")
-def start(paper):
+@click.option("--only", multiple=True, help="Run only these strategies (repeatable, e.g. --only llm_crypto --only sports_daily)")
+def start(paper, only):
     """Start the trading bot."""
     settings = get_settings()
     settings.paper_trading = paper
+    if only:
+        settings.only_strategies = list(only)
     mode = "PAPER" if paper else "LIVE"
 
     if not paper and not settings.has_credentials():
         console.print("[red]No credentials configured. Run: python -m src.main setup[/red]")
         return
 
+    strat_line = f"Strategies: {', '.join(settings.only_strategies)}" if settings.only_strategies else "Strategies: all"
     console.print(Panel(
         f"[bold green]Starting bot in {mode} mode[/bold green]\n"
         f"Capital: ${settings.starting_capital} -> ${settings.target_balance}\n"
         f"Target: {settings.target_days} days\n"
+        f"{strat_line}\n"
         f"Press Ctrl+C to stop",
         title="Poly Trade Bot",
     ))
@@ -388,56 +393,75 @@ def xray(top):
     console.print(Panel(rec_panel, title="Recommendations", border_style="green"))
 
 
-@cli.command()
-def dbs():
-    """List all strategy databases."""
-    from pathlib import Path
-    import sqlite3, os
+@cli.command("db-info")
+def db_info():
+    """Show per-strategy breakdown from the unified database."""
+    import os
 
-    data_dir = Path("data")
-    db_files = sorted(data_dir.glob("poly_trade*.db"))
+    settings = get_settings()
+    db_path = settings.db_path
 
-    if not db_files:
-        console.print("[yellow]No databases found in data/[/yellow]")
+    if not db_path.exists():
+        console.print("[yellow]No database found at data/poly_trade.db[/yellow]")
         return
 
-    table = Table(title="Strategy Databases")
-    table.add_column("Database")
-    table.add_column("Strategies")
-    table.add_column("Positions", justify="right")
-    table.add_column("Trades", justify="right")
-    table.add_column("Size", justify="right")
+    conn = init_db(db_path)
+    size_kb = os.path.getsize(db_path) / 1024
 
-    for db_path in db_files:
-        size_kb = os.path.getsize(db_path) / 1024
-        # Derive strategies from filename
-        stem = db_path.stem  # e.g. poly_trade_btc_updown or poly_trade
-        if stem == "poly_trade":
-            strats = "all (default)"
-        else:
-            strats = stem.removeprefix("poly_trade_").replace("_", ", ", stem.count("_") - 1)
-            # Re-derive properly: filename is poly_trade_{sorted strategies joined by _}
-            # Strategy names themselves contain underscores, so just show raw suffix
-            strats = stem.removeprefix("poly_trade_")
+    # Per-strategy open positions
+    pos_rows = conn.execute(
+        "SELECT strategy, COUNT(*) as cnt FROM positions WHERE status='open' GROUP BY strategy ORDER BY cnt DESC"
+    ).fetchall()
 
-        try:
-            conn = sqlite3.connect(str(db_path))
-            positions = conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'").fetchone()[0]
-            trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-            conn.close()
-        except Exception:
-            positions = "?"
-            trades = "?"
+    # Per-strategy trade count (today)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    trade_rows = conn.execute(
+        "SELECT strategy, COUNT(*) as cnt FROM trades WHERE timestamp >= ? GROUP BY strategy ORDER BY cnt DESC",
+        (today,),
+    ).fetchall()
 
-        table.add_row(
-            db_path.name,
-            strats,
-            str(positions),
-            str(trades),
-            f"{size_kb:.0f} KB",
-        )
+    # Total balance info
+    total_open = conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'").fetchone()[0]
+    total_trades = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
 
-    console.print(table)
+    # Latest snapshot
+    snap = conn.execute(
+        "SELECT date, balance, aggression_level FROM daily_snapshots ORDER BY date DESC LIMIT 1"
+    ).fetchone()
+
+    conn.close()
+
+    # Summary panel
+    snap_info = ""
+    if snap:
+        snap_info = f"\nLast snapshot: {snap['date']}  balance=${snap['balance']:.2f}  aggression={snap['aggression_level'] or 'N/A'}"
+
+    console.print(Panel(
+        f"[bold]Database:[/bold] {db_path}  ({size_kb:.0f} KB)\n"
+        f"[bold]Open positions:[/bold] {total_open}   [bold]Total trades:[/bold] {total_trades}"
+        f"{snap_info}",
+        title="Unified DB Info",
+    ))
+
+    # Open positions per strategy
+    if pos_rows:
+        pos_table = Table(title="Open Positions by Strategy")
+        pos_table.add_column("Strategy")
+        pos_table.add_column("Count", justify="right")
+        for row in pos_rows:
+            pos_table.add_row(row["strategy"], str(row["cnt"]))
+        console.print(pos_table)
+
+    # Trades today per strategy
+    if trade_rows:
+        trade_table = Table(title=f"Trades Today ({today})")
+        trade_table.add_column("Strategy")
+        trade_table.add_column("Count", justify="right")
+        for row in trade_rows:
+            trade_table.add_row(row["strategy"], str(row["cnt"]))
+        console.print(trade_table)
+    else:
+        console.print(f"[dim]No trades today ({today})[/dim]")
 
 
 @cli.command()

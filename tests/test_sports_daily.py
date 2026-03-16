@@ -18,7 +18,7 @@ def make_settings(**overrides):
         "sports_daily_min_liquidity": 1000.0,
         "sports_daily_min_spread": 0.04,
         "sports_daily_max_spread": 0.40,
-        "sports_daily_min_book_depth": 50.0,
+        "sports_daily_min_book_depth": 20.0,
         "sports_daily_max_hours_to_resolution": 24,
         "sports_daily_favorite_min_prob": 0.82,
         "sports_daily_favorite_max_prob": 0.95,
@@ -308,6 +308,10 @@ class TestFavoriteValue:
 # --- Market discovery tests ---
 
 class TestMarketDiscovery:
+    def _mock_game_events(self, strategy, events):
+        """Mock primary game events source (series_id-based)."""
+        strategy.gamma.get_all_sports_game_events = MagicMock(return_value=events)
+
     def test_filters_by_resolution_time(self):
         strategy = make_strategy(sports_daily_max_hours_to_resolution=24)
 
@@ -317,7 +321,7 @@ class TestMarketDiscovery:
         bad_market = make_sports_market(hours_remaining=48.0)
         bad_market["conditionId"] = "cond2"
 
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        self._mock_game_events(strategy, [
             {
                 "title": "NBA: Lakers vs Celtics",
                 "slug": "nba-lakers",
@@ -332,7 +336,7 @@ class TestMarketDiscovery:
         strategy = make_strategy(sports_daily_min_volume=5000)
 
         low_vol = make_sports_market(volume=100, liquidity=5000)
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        self._mock_game_events(strategy, [
             {"title": "NBA Game", "slug": "nba", "markets": [low_vol]}
         ])
 
@@ -343,7 +347,7 @@ class TestMarketDiscovery:
         strategy = make_strategy(sports_daily_min_liquidity=1000)
 
         low_liq = make_sports_market(volume=10000, liquidity=100)
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        self._mock_game_events(strategy, [
             {"title": "NBA Game", "slug": "nba", "markets": [low_liq]}
         ])
 
@@ -354,21 +358,23 @@ class TestMarketDiscovery:
         strategy = make_strategy()
 
         market = make_sports_market()
-        # Same market appears in two tags
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        # Same market appears in two leagues
+        self._mock_game_events(strategy, [
             {"title": "NBA", "slug": "nba", "markets": [market, market]}
         ])
 
         markets = strategy._discover_sports_markets()
         assert len(markets) == 1
 
-    def test_fallback_keyword_search(self):
-        """Falls back to keyword search when tag search returns nothing."""
+    def test_fallback_tag_search(self):
+        """Falls back to tag search when game events return nothing."""
         strategy = make_strategy()
 
         market = make_sports_market()
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[])
-        strategy.gamma.get_active_events = MagicMock(return_value=[
+        # Primary source returns empty
+        self._mock_game_events(strategy, [])
+        # Fallback tag search finds the market
+        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
             {
                 "title": "NBA: Lakers vs Celtics",
                 "slug": "nba-lakers",
@@ -436,7 +442,7 @@ class TestIntegration:
         )
 
         market = make_sports_market()
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        strategy.gamma.get_all_sports_game_events = MagicMock(return_value=[
             {"title": "NBA Game", "slug": "nba", "markets": [market]}
         ])
 
@@ -454,7 +460,7 @@ class TestIntegration:
         strategy = make_strategy()
 
         market = make_sports_market()
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        strategy.gamma.get_all_sports_game_events = MagicMock(return_value=[
             {"title": "NBA Game", "slug": "nba", "markets": [market]}
         ])
 

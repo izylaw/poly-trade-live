@@ -73,6 +73,8 @@ class SafeCompounderStrategy(Strategy):
         self._btc_delta_cache = {}
 
         # Parallel prefetch all asset data
+        if not self.assets:
+            return []
         asset_data = {}
         with ThreadPoolExecutor(max_workers=len(self.assets)) as pool:
             futures = {asset: pool.submit(self._prefetch_asset_data, asset)
@@ -317,6 +319,7 @@ class SafeCompounderStrategy(Strategy):
                 post_only=True,
                 cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
                 resolution_ts=resolution_ts,
+                slug=market.get("_event_slug", ""),
             ))
 
         return signals
@@ -412,6 +415,7 @@ class SafeCompounderStrategy(Strategy):
                     post_only=True,
                     cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
                     resolution_ts=resolution_ts,
+                    slug=market.get("_event_slug", ""),
                 )
 
         return best_signal

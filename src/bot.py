@@ -26,6 +26,7 @@ from src.market_data.binance_client import BinanceClient
 from src.strategies.high_probability import HighProbabilityStrategy
 from src.strategies.arbitrage import ArbitrageStrategy
 from src.strategies.btc_updown import BtcUpdownStrategy
+from src.strategies.crypto_hourly import CryptoHourlyStrategy
 from src.strategies.safe_compounder import SafeCompounderStrategy
 from src.strategies.sports_daily import SportsDailyStrategy
 
@@ -33,7 +34,7 @@ logger = logging.getLogger("poly-trade")
 
 
 ALL_STRATEGIES = [
-    "high_probability", "arbitrage", "btc_updown",
+    "high_probability", "arbitrage", "btc_updown", "crypto_hourly",
     "safe_compounder", "sports_daily", "llm_crypto",
 ]
 
@@ -80,6 +81,7 @@ class Bot:
             HighProbabilityStrategy(s),
             ArbitrageStrategy(s),
             BtcUpdownStrategy(s, binance=binance),
+            CryptoHourlyStrategy(s, binance=binance),
             SafeCompounderStrategy(s, binance=binance),
             SportsDailyStrategy(s),
         ]
