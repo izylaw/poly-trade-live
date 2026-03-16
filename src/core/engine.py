@@ -197,6 +197,7 @@ class TradingEngine:
             if o.get("strategy") != "high_probability"
         ]
 
+        executed_count = 0
         for signal in all_signals:
             # Duplicate market check (strategy-aware)
             max_for_market = RiskManager.STRATEGY_MAX_PER_MARKET.get(signal.strategy, self.settings.max_positions_per_market)
@@ -210,28 +211,26 @@ class TradingEngine:
 
             result = self.executor.execute(approved)
             if result.get("status") in ("filled", "pending"):
+                executed_count += 1
                 market_pos_count[signal.market_id] += 1
+                cost = getattr(approved, 'cost', 0)
+                positions_for_risk.append(
+                    {"market_id": signal.market_id, "strategy": signal.strategy,
+                     "is_long_term": 0, "cost": cost}
+                )
                 if result.get("status") == "pending":
                     self.order_manager.track_order(result)
-                    # Add to positions_for_risk so next iteration counts it
-                    positions_for_risk.append(
-                        {"market_id": signal.market_id, "strategy": signal.strategy,
-                         "is_long_term": 0, "cost": 0}
-                    )
-                # Update running state
-                balance = self.executor.get_balance()
-                self.balance_mgr.update(balance)
-                open_positions = self.executor.get_open_positions()
-                exposure = self.balance_mgr.portfolio_exposure(open_positions)
-                # Rebuild positions_for_risk with fresh DB positions + still-pending orders
-                # (exclude HP pending — fill-time enforcement)
-                still_pending = self.order_manager.get_pending_orders()
-                positions_for_risk = open_positions + [
-                    {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
-                     "is_long_term": 0, "cost": 0}
-                    for o in still_pending
-                    if o.get("strategy") != "high_probability"
-                ]
+                elif result.get("status") == "filled":
+                    # Deduct estimated cost from balance for risk checks
+                    balance -= cost
+                    exposure = self.balance_mgr.portfolio_exposure(positions_for_risk)
+
+        # Refresh actual state once after all executions
+        if executed_count > 0:
+            balance = self.executor.get_balance()
+            self.balance_mgr.update(balance)
+            open_positions = self.executor.get_open_positions()
+            exposure = self.balance_mgr.portfolio_exposure(open_positions)
 
         # Check pending maker orders for fills/timeouts
         if self.order_manager.get_pending_orders():

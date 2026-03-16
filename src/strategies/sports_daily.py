@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from src.strategies.base import Strategy
@@ -29,6 +30,7 @@ SPORT_KEYWORDS = {
     "wnba", "mls", "copa", "world cup", "afl", "ipl",
     "esports", "lol", "dota", "csgo", "valorant",
     "top 14", "currie cup", "super rugby",
+    "baseball",
 }
 
 # Patterns that indicate a sports game/match question
@@ -114,8 +116,9 @@ class SportsDailyStrategy(Strategy):
         """Find sports markets resolving within max_hours_to_resolution."""
         all_markets = []
 
-        # Source 1: fetch game-level events by league series_id
-        for league in self.GAME_LEAGUES:
+        # Fetch both sources (leagues + tags) in parallel
+        def _fetch_league(league):
+            results = []
             try:
                 events = self.gamma.get_all_sports_game_events(league)
                 for event in events:
@@ -124,28 +127,35 @@ class SportsDailyStrategy(Strategy):
                     for m in event.get("markets", []):
                         m["_event_title"] = title
                         m["_event_slug"] = slug
-                        all_markets.append(m)
+                        results.append(m)
             except Exception as e:
                 logger.debug(f"sports_daily: league '{league}' fetch failed: {e}")
+            return results
 
-        # Source 2 (always): tag_slug search for sports not covered by series_id
-        # (UFC, tennis, cricket, golf, F1, La Liga, etc. + props/futures within leagues)
-        # Cap at 5 pages (500 events) per tag to avoid rate-limiting
-        for tag in self.tags_to_search:
+        def _fetch_tag(tag):
+            results = []
             try:
                 events = self.gamma.get_all_events_by_tag(tag, max_pages=5)
                 for event in events:
                     title = event.get("title", "")
                     slug = event.get("slug", "")
-                    tags = event.get("tags", [])
-                    if not self._is_sports_event(title, slug, tags):
-                        continue
                     for m in event.get("markets", []):
                         m["_event_title"] = title
                         m["_event_slug"] = slug
-                        all_markets.append(m)
+                        results.append(m)
             except Exception as e:
                 logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
+            return results
+
+        workers = len(self.GAME_LEAGUES) + len(self.tags_to_search)
+        with ThreadPoolExecutor(max_workers=min(workers, 12)) as pool:
+            futures = []
+            for league in self.GAME_LEAGUES:
+                futures.append(pool.submit(_fetch_league, league))
+            for tag in self.tags_to_search:
+                futures.append(pool.submit(_fetch_tag, tag))
+            for future in as_completed(futures):
+                all_markets.extend(future.result())
 
         # Deduplicate by conditionId
         seen = set()

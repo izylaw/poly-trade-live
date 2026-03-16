@@ -150,18 +150,34 @@ class PolymarketClobClient:
         """
         client = self._get_client()
         result = {}
+        chunks = [token_ids[i : i + chunk_size] for i in range(0, len(token_ids), chunk_size)]
 
-        for i in range(0, len(token_ids), chunk_size):
-            chunk = token_ids[i : i + chunk_size]
-            try:
-                params = [BookParams(token_id=tid) for tid in chunk]
-                books = client.get_order_books(params)
-                for book in books:
-                    tid = book.asset_id
-                    if tid is not None:
-                        result[tid] = book
-            except Exception as e:
-                logger.warning(f"Batch book fetch failed ({len(chunk)} tokens): {e}")
+        def _fetch_chunk(chunk):
+            chunk_result = {}
+            params = [BookParams(token_id=tid) for tid in chunk]
+            books = client.get_order_books(params)
+            for book in books:
+                tid = book.asset_id
+                if tid is not None:
+                    chunk_result[tid] = book
+            return chunk_result
+
+        if len(chunks) <= 1:
+            if chunks:
+                try:
+                    result = _fetch_chunk(chunks[0])
+                except Exception as e:
+                    logger.warning(f"Batch book fetch failed ({len(chunks[0])} tokens): {e}")
+        else:
+            workers = min(len(chunks), 6)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_fetch_chunk, chunk): chunk for chunk in chunks}
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    try:
+                        result.update(future.result())
+                    except Exception as e:
+                        logger.warning(f"Batch book fetch failed ({len(chunk)} tokens): {e}")
 
         logger.info(f"Batch books: {len(result)}/{len(token_ids)} tokens returned data")
         return result
