@@ -105,45 +105,46 @@ class SportsDailyStrategy(Strategy):
 
     # --- Market discovery ---
 
+    # Leagues to query via Gamma series_id (game-level markets)
+    GAME_LEAGUES = ["nba", "nfl", "mlb", "nhl", "ufc", "mls", "epl"]
+
     def _discover_sports_markets(self) -> list[dict]:
         """Find sports markets resolving within max_hours_to_resolution."""
         all_markets = []
 
-        # Source 1: tag-based search for each configured tag (parallel pagination)
-        for tag in self.tags_to_search:
+        # Source 1 (primary): fetch game-level events by league series_id
+        # These are the actual daily game markets with real orderbooks
+        for league in self.GAME_LEAGUES:
             try:
-                events = self.gamma.get_all_events_by_tag(tag)
+                events = self.gamma.get_all_sports_game_events(league)
                 for event in events:
                     title = event.get("title", "")
                     slug = event.get("slug", "")
-                    tags = event.get("tags", [])
-                    if not self._is_sports_event(title, slug, tags):
-                        continue
                     for m in event.get("markets", []):
                         m["_event_title"] = title
                         m["_event_slug"] = slug
                         all_markets.append(m)
             except Exception as e:
-                logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
+                logger.debug(f"sports_daily: league '{league}' fetch failed: {e}")
 
-        # Source 2: scan all active events and filter by keywords (catches
-        # sports events not tagged with any of the configured tags)
-        try:
-            for page in range(30):
-                events = self.gamma.get_active_events(limit=100, offset=page * 100)
-                if not events:
-                    break
-                for event in events:
-                    title = event.get("title", "")
-                    slug = event.get("slug", "")
-                    tags = event.get("tags", [])
-                    if self._is_sports_event(title, slug, tags):
+        # Source 2 (fallback): tag-based search for non-game sports markets
+        # (futures, props not covered by series_id)
+        if not all_markets:
+            for tag in self.tags_to_search:
+                try:
+                    events = self.gamma.get_all_events_by_tag(tag)
+                    for event in events:
+                        title = event.get("title", "")
+                        slug = event.get("slug", "")
+                        tags = event.get("tags", [])
+                        if not self._is_sports_event(title, slug, tags):
+                            continue
                         for m in event.get("markets", []):
                             m["_event_title"] = title
                             m["_event_slug"] = slug
                             all_markets.append(m)
-        except Exception as e:
-            logger.warning(f"sports_daily: event scan failed: {e}")
+                except Exception as e:
+                    logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
 
         # Deduplicate by conditionId
         seen = set()

@@ -170,6 +170,63 @@ class GammaClient:
         self._set_cache(cache_key, data)
         return data
 
+    # Sports league → Gamma series_id mapping (from /sports endpoint)
+    SPORTS_SERIES = {
+        "nba": "10345",
+        "nfl": "10187",
+        "mlb": "3",
+        "nhl": "10346",
+        "ufc": "10500",
+        "mls": "10189",
+        "epl": "10188",
+        "soccer": "10188",  # alias
+    }
+
+    def get_sports_game_events(self, league: str, limit: int = 100, offset: int = 0) -> list[dict]:
+        """Fetch active sports game events by league series_id."""
+        series_id = self.SPORTS_SERIES.get(league.lower())
+        if not series_id:
+            return []
+
+        cache_key = f"sports_games_{league}_{limit}_{offset}"
+        cached = self._get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            resp = requests.get(
+                f"{GAMMA_API_URL}/events",
+                params={"limit": limit, "offset": offset, "active": True,
+                        "closed": False, "series_id": series_id},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._set_cache(cache_key, data)
+            return data
+        except Exception as e:
+            logger.warning(f"Gamma sports games '{league}' fetch failed: {e}")
+            return []
+
+    def get_all_sports_game_events(self, league: str, max_pages: int = 10) -> list[dict]:
+        """Paginate sports game events for a league."""
+        cache_key = f"all_sports_games_{league}_{max_pages}"
+        cached = self._get_cached(cache_key, ttl=45.0)
+        if cached is not None:
+            return cached
+
+        all_events = []
+        for page in range(max_pages):
+            events = self.get_sports_game_events(league, limit=100, offset=page * 100)
+            if not events:
+                break
+            all_events.extend(events)
+
+        if all_events:
+            logger.info(f"Fetched {len(all_events)} game events for '{league}'")
+        self._set_cache(cache_key, all_events)
+        return all_events
+
     # Interval durations in seconds for slug construction
     INTERVAL_SECONDS = {"5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 
