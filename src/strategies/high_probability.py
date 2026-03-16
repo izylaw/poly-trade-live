@@ -118,6 +118,7 @@ class HighProbabilityStrategy(Strategy):
                     post_only=True,
                     cancel_after_ts=cancel_ts,
                     resolution_ts=signal.resolution_ts,
+                    slug=signal.slug,
                 ))
             elif self.min_price <= ask <= self.max_price:
                 # Taker: buy at the ask
@@ -135,6 +136,7 @@ class HighProbabilityStrategy(Strategy):
                     expected_value=ev,
                     order_type="GTC",
                     resolution_ts=signal.resolution_ts,
+                    slug=signal.slug,
                 ))
             elif ask > self.max_price and self.min_price <= bid + 0.01 <= self.max_price:
                 # Ask above max (including no asks at 1.0) — place maker bid just above best bid
@@ -155,6 +157,7 @@ class HighProbabilityStrategy(Strategy):
                     post_only=True,
                     cancel_after_ts=cancel_ts,
                     resolution_ts=signal.resolution_ts,
+                    slug=signal.slug,
                 ))
             else:
                 clob_out_of_range += 1
@@ -231,6 +234,7 @@ class HighProbabilityStrategy(Strategy):
                 expected_value=expected_value,
                 order_type="GTC",
                 resolution_ts=_parse_resolution_ts(market),
+                slug=market.get("_event_slug", ""),
             )
         return None
 

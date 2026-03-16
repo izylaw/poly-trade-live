@@ -226,6 +226,7 @@ class SportsDailyStrategy(Strategy):
         tokens = market.get("clobTokenIds", [])
         market_id = market.get("conditionId", market.get("condition_id", ""))
         question = market.get("question", market.get("_event_title", ""))
+        slug = market.get("_event_slug", "")
 
         if len(outcomes) < 2 or len(tokens) < 2:
             return []
@@ -335,6 +336,7 @@ class SportsDailyStrategy(Strategy):
                 volume=volume, liquidity=liquidity,
             )
             if sig:
+                sig.slug = slug
                 pred["traded"] = True
                 pred["signal_type"] = "spread_capture"
                 pred["bid_price"] = sig.price
@@ -349,6 +351,7 @@ class SportsDailyStrategy(Strategy):
                 volume=volume, liquidity=liquidity,
             )
             if sig:
+                sig.slug = slug
                 pred["traded"] = True
                 pred["signal_type"] = "book_imbalance"
                 pred["bid_price"] = sig.price
@@ -362,6 +365,7 @@ class SportsDailyStrategy(Strategy):
                 bid, ask, mid, book, hours_remaining,
             )
             if sig:
+                sig.slug = slug
                 pred["traded"] = True
                 pred["signal_type"] = "favorite_value"
                 pred["bid_price"] = sig.price

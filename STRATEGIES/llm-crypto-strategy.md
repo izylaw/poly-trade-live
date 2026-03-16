@@ -92,6 +92,11 @@ llm_intervals: ["1h", "4h"]      # Intervals for updown markets
 llm_daily_lookahead_days: 5      # Days ahead for daily market scan
 ```
 
+## Position Limits
+- Per-strategy cap: 2
+- Long-term positions (resolution >7 days) use a separate shared bucket of 5
+- Per-market limit: 1
+
 ## Risk
 - Maker GTC orders with `post_only=True` (zero maker fees)
 - Inherits global risk gates (hard floor, max positions, daily loss limit)

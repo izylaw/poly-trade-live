@@ -17,13 +17,13 @@ The bot runs a 30-second trading loop:
 
 **High Probability** — Buys outcomes priced $0.92–$0.98 that are near-certain to resolve YES. Small edge (2–8%) but very high win rate. Uses GTC limit orders for patient fills.
 
-**Arbitrage** — Detects when `ask(YES) + ask(NO) < $1.00` for guaranteed profit. Uses FOK orders for immediate execution. Rare but risk-free when found.
+**Arbitrage** — Three modes of risk-free arbitrage detection: (1) single-market YES+NO spread when `ask(YES) + ask(NO) < $1.00 - fees`, (2) multi-outcome event arb buying all YES tokens when `sum(asks) < $1.00 - fees` for events with 3+ mutually exclusive outcomes, and (3) cross-market monotonicity arb on "above $X" crypto events when strike-price ordering is violated. All use FOK orders for immediate execution.
 
 **Sports Daily** — Trades daily sports events using market microstructure signals: spread capture (maker bids in wide spreads), book imbalance (follow informed flow), and favorite value (exploit favorite-longshot bias). Self-discovering — finds markets via Gamma tag search with parallel pagination. Uses batch orderbook fetches for efficiency.
 
 **BTC Up/Down** — Trades crypto up/down interval markets (5m, 15m) using a price delta probability model. Captures reference price at window start, converts delta to directional probability via logistic function with momentum confirmation. Maker GTC orders with book-aware bidding.
 
-**Safe Compounder** — Conservative crypto interval strategy targeting high-confidence setups across BTC, ETH, SOL. Dual-side evaluation with cross-asset confirmation boost. Stricter risk limits (30% hard floor, 8% max trade, 3 max positions).
+**Safe Compounder** — Conservative crypto interval strategy targeting high-confidence setups across BTC, ETH, SOL. Dual-side evaluation (per-market limit = 2) with cross-asset confirmation boost. Stricter risk limits (30% hard floor, 8% max trade, per-strategy cap = 3).
 
 **LLM Crypto** — Uses a local LLM (Ollama/Qwen 27B) to analyze all crypto market types on Polymarket: up/down (1h/4h intervals), above/below, price range, daily up/down, weekly hit price, and monthly hit price. Sends Binance price data + Polymarket orderbook data to the LLM in batches. Self-discovering via slug-based market lookup. Runs every other cycle to manage LLM latency.
 
@@ -36,7 +36,9 @@ Every trade must pass all checks:
 | Hard Floor | 20% of starting capital ($2) | Balance never reaches $0 |
 | Max Single Trade | 10% of balance | No catastrophic single loss |
 | Max Portfolio Exposure | 60% of balance | Keep cash reserve |
-| Max Open Positions | 5 | Prevent over-diversification |
+| Per-Strategy Caps | 8 high_prob, 4 sports, 3 btc/safe, 2 llm (20 total) | Strategy-specific slot allocation |
+| Long-Term Bucket | 5 additive (resolution >7d) | Separate from short-term caps |
+| Arbitrage | Exempt from caps | Risk-free, unlimited |
 | Daily Loss Limit | 15% of start-of-day balance | Stop bleeding |
 | Min Trade Size | $0.50 | Skip meaningless trades |
 | Consecutive Loss Limit | 3 losses → 30min pause | Break losing streaks |

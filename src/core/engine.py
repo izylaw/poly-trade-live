@@ -178,19 +178,33 @@ class TradingEngine:
         exposure = self.balance_mgr.portfolio_exposure(open_positions)
 
         # Build per-market position count (open positions + pending orders)
+        # Include pending orders as pseudo-positions so per-strategy + global
+        # limits in risk_manager count them (pending orders haven't created
+        # DB positions yet, but they occupy slots).
+        # Exception: high_probability uses fill-time enforcement — pending HP
+        # orders don't count against per-strategy limits (more orderbook coverage),
+        # but still count for per-market dedup (no duplicate market bids).
+        pending_orders = self.order_manager.get_pending_orders()
         market_pos_count = Counter(p["market_id"] for p in open_positions if p.get("market_id"))
-        for o in self.order_manager.get_pending_orders():
+        for o in pending_orders:
             if o.get("market_id"):
                 market_pos_count[o["market_id"]] += 1
 
+        positions_for_risk = open_positions + [
+            {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
+             "is_long_term": 0, "cost": 0}
+            for o in pending_orders
+            if o.get("strategy") != "high_probability"
+        ]
+
         for signal in all_signals:
-            # Duplicate market check
-            max_for_market = 2 if signal.strategy == "arbitrage" else self.settings.max_positions_per_market
+            # Duplicate market check (strategy-aware)
+            max_for_market = RiskManager.STRATEGY_MAX_PER_MARKET.get(signal.strategy, self.settings.max_positions_per_market)
             if market_pos_count.get(signal.market_id, 0) >= max_for_market:
                 logger.debug(f"SKIP duplicate market: {signal.market_question[:50]}")
                 continue
 
-            approved = self.risk_manager.evaluate(signal, balance, open_positions, exposure)
+            approved = self.risk_manager.evaluate(signal, balance, positions_for_risk, exposure)
             if approved is None:
                 continue
 
@@ -199,11 +213,25 @@ class TradingEngine:
                 market_pos_count[signal.market_id] += 1
                 if result.get("status") == "pending":
                     self.order_manager.track_order(result)
+                    # Add to positions_for_risk so next iteration counts it
+                    positions_for_risk.append(
+                        {"market_id": signal.market_id, "strategy": signal.strategy,
+                         "is_long_term": 0, "cost": 0}
+                    )
                 # Update running state
                 balance = self.executor.get_balance()
                 self.balance_mgr.update(balance)
                 open_positions = self.executor.get_open_positions()
                 exposure = self.balance_mgr.portfolio_exposure(open_positions)
+                # Rebuild positions_for_risk with fresh DB positions + still-pending orders
+                # (exclude HP pending — fill-time enforcement)
+                still_pending = self.order_manager.get_pending_orders()
+                positions_for_risk = open_positions + [
+                    {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
+                     "is_long_term": 0, "cost": 0}
+                    for o in still_pending
+                    if o.get("strategy") != "high_probability"
+                ]
 
         # Check pending maker orders for fills/timeouts
         if self.order_manager.get_pending_orders():

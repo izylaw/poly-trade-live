@@ -18,6 +18,7 @@ Adaptive Polymarket trading bot. Python, uses py-clob-client. Starts with $10 ta
 - Every trade passes through risk_manager before execution.
 - Paper trading mode by default (PAPER_TRADING=true).
 - Half-Kelly position sizing.
+- Three-dimensional position limits: per-strategy caps (8 high_prob, 4 sports, 3 btc/safe, 2 llm = 20 total short-term), long-term bucket (5, resolution >7d, additive), arb exempt. Per-market: 2 for arb/safe_compounder/sports_daily, 1 for others. high_probability uses fill-time enforcement (pending orders don't count against cap; limit enforced when orders fill, remaining cancelled).
 
 ## Commands
 ```

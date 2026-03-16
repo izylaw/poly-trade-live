@@ -15,7 +15,7 @@ class MarketFilter:
             if self._passes(m):
                 filtered.append(m)
         logger.debug(f"Filtered {len(markets)} -> {len(filtered)} markets")
-        return filtered[:self.settings.max_markets]
+        return filtered[:self.settings.max_markets] if self.settings.max_markets else filtered
 
     def _passes(self, market: dict) -> bool:
         # Must be active and not closed
