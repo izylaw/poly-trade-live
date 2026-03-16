@@ -67,7 +67,9 @@ Each cycle runs every 30 seconds:
      - Circuit breaker not active
      - Balance > hard floor
      - Confidence >= min threshold
-     - Open positions < max
+     - Global cap (20 short-term) → per-strategy cap → per-market limit
+     - Long-term bucket (5, resolution >7d, additive)
+     - Arbitrage exempt from position caps
      - Portfolio exposure < max
      - Daily loss limit not hit
      - Half-Kelly sizing > min trade
@@ -131,7 +133,7 @@ MarketFilter                       TradeSignal
               |  1. CircuitBreaker   |--- paused? (losses, API errors, daily limit)
               |  2. Hard Floor       |--- balance > 20% of starting capital?
               |  3. Confidence       |--- signal >= min_confidence (tunable)?
-              |  4. Max Positions    |--- open_positions < 5?
+              |  4. Position Limits  |--- 3-tier: global(20) → per-strategy → per-market
               |  5. Exposure Limit   |--- portfolio < 60% of balance?
               |  6. Daily Loss       |--- today's loss < 15%?
               |  7. Kelly Sizing     |--- half_kelly > min_trade ($0.50)?
@@ -168,11 +170,11 @@ GoalTracker
 AggressionTuner
   reads GoalStatus, sets RiskManager params:
 
-  behind_pct <= 0%  -> conservative (5% max trade, 0.85 confidence, high-prob only)
-  behind_pct <= 5%  -> moderate     (10% max trade, 0.70 confidence, both strategies)
-  behind_pct <= 20% -> aggressive   (15% max trade, 0.60 confidence, both strategies)
-  behind_pct >  20% -> ultra        (15% max trade, 0.55 confidence, both strategies)
-  balance < start   -> emergency    (5% max trade, 0.90 confidence, high-prob only)
+  behind_pct <= 0%  -> conservative (5% max trade, 0.85 confidence, high-prob + arbitrage)
+  behind_pct <= 5%  -> moderate     (10% max trade, 0.70 confidence, all strategies)
+  behind_pct <= 20% -> aggressive   (15% max trade, 0.60 confidence, all strategies)
+  behind_pct >  20% -> ultra        (15% max trade, 0.55 confidence, all strategies)
+  balance < 60% start -> emergency  (5% max trade, 0.90 confidence, high-prob + arbitrage)
 ```
 
 ## Storage Schema
@@ -209,16 +211,32 @@ For each market with outcome priced $0.92-$0.98:
   order_type = GTC (patient fills)
 ```
 
-### Arbitrage
+### Arbitrage (3 modes)
 
 ```
-For each binary market:
-  if ask(YES) + ask(NO) < $1.00:
-    spread = 1.0 - (ask_YES + ask_NO)
-    if spread > 0.5%:
-      emit BUY YES + BUY NO signals
-      order_type = FOK (immediate fill)
-      confidence = 0.95
+1. Single-market YES+NO arb:
+   For each binary market:
+     spread = (1.0 - fee_rate) - (ask_YES + ask_NO)
+     if spread > 0.5%:
+       emit BUY YES + BUY NO signals (FOK, confidence=0.95)
+
+2. Multi-outcome event arb:
+   Group markets by _event_slug
+   For events with 3-6 markets (excluding above/below):
+     spread = (1.0 - fee_rate) - sum(all YES asks)
+     if spread > min_event_spread (2%):
+       emit BUY YES for each outcome (FOK, confidence=0.95)
+
+3. Cross-market monotonicity arb (above/below crypto events):
+   For events where slug/question contains "above":
+     Parse strike prices from questions (regex: $[\d,]+)
+     Sort by strike ascending
+     YES prices must decrease as strike increases
+     For each violation (lower strike YES cheaper than higher strike YES):
+       cost = low_strike_YES_ask + high_strike_NO_ask
+       spread = 1.0 - cost - 2*fee_rate
+       if spread > mono_min_spread (1%):
+         emit BUY low-strike YES + BUY high-strike NO (FOK, confidence=0.95)
 ```
 
 ### Sports Daily (self-discovering)

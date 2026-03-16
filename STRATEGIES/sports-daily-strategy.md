@@ -75,6 +75,10 @@ sports_daily_min_edge: 0.015
 sports_daily_tags: ["sports", "nba", "nfl", "mlb", "nhl", "mma", "soccer", "tennis"]
 ```
 
+## Position Limits
+- Per-strategy cap: 4
+- Per-market limit: 2 (both outcomes possible on the same market)
+
 ## Risk
 - Strategy-specific min_confidence override: none (uses aggression tuner default)
 - Enabled in moderate, aggressive, and ultra aggression levels

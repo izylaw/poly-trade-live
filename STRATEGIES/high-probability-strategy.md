@@ -42,6 +42,12 @@ high_prob_longshot_conf_multiplier: 1.5
 high_prob_maker_ttl_hours: 48
 ```
 
+## Position Limits
+- Per-strategy cap: 8 short-term positions
+- Long-term positions (resolution >7 days) use a separate shared bucket of 5
+- Per-market limit: 1
+- **Fill-time enforcement**: pending GTC orders are NOT counted against the per-strategy cap (allowing wider orderbook coverage). The limit is enforced when orders fill — once 8 positions are open, remaining pending HP orders are cancelled.
+
 ## Risk
 - Enabled at ALL aggression levels (core strategy)
 - Position sizing via half-Kelly criterion

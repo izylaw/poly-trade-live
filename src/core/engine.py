@@ -1,7 +1,7 @@
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from src.config.settings import Settings
 from src.market_data.market_scanner import MarketScanner
@@ -161,8 +161,8 @@ class TradingEngine:
                     except Exception as e:
                         logger.debug(f"Failed to log prediction: {e}")
 
-        # Resolve past predictions and open positions (every 5th cycle)
-        if self._cycle_count % 5 == 0:
+        # Resolve past predictions and open positions (first cycle + every 5th)
+        if self._cycle_count == 1 or self._cycle_count % 5 == 0:
             self._resolve_predictions()
             self._resolve_positions()
 
@@ -178,19 +178,33 @@ class TradingEngine:
         exposure = self.balance_mgr.portfolio_exposure(open_positions)
 
         # Build per-market position count (open positions + pending orders)
+        # Include pending orders as pseudo-positions so per-strategy + global
+        # limits in risk_manager count them (pending orders haven't created
+        # DB positions yet, but they occupy slots).
+        # Exception: high_probability uses fill-time enforcement — pending HP
+        # orders don't count against per-strategy limits (more orderbook coverage),
+        # but still count for per-market dedup (no duplicate market bids).
+        pending_orders = self.order_manager.get_pending_orders()
         market_pos_count = Counter(p["market_id"] for p in open_positions if p.get("market_id"))
-        for o in self.order_manager.get_pending_orders():
+        for o in pending_orders:
             if o.get("market_id"):
                 market_pos_count[o["market_id"]] += 1
 
+        positions_for_risk = open_positions + [
+            {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
+             "is_long_term": 0, "cost": 0}
+            for o in pending_orders
+            if o.get("strategy") != "high_probability"
+        ]
+
         for signal in all_signals:
-            # Duplicate market check
-            max_for_market = 2 if signal.strategy == "arbitrage" else self.settings.max_positions_per_market
+            # Duplicate market check (strategy-aware)
+            max_for_market = RiskManager.STRATEGY_MAX_PER_MARKET.get(signal.strategy, self.settings.max_positions_per_market)
             if market_pos_count.get(signal.market_id, 0) >= max_for_market:
                 logger.debug(f"SKIP duplicate market: {signal.market_question[:50]}")
                 continue
 
-            approved = self.risk_manager.evaluate(signal, balance, open_positions, exposure)
+            approved = self.risk_manager.evaluate(signal, balance, positions_for_risk, exposure)
             if approved is None:
                 continue
 
@@ -199,11 +213,25 @@ class TradingEngine:
                 market_pos_count[signal.market_id] += 1
                 if result.get("status") == "pending":
                     self.order_manager.track_order(result)
+                    # Add to positions_for_risk so next iteration counts it
+                    positions_for_risk.append(
+                        {"market_id": signal.market_id, "strategy": signal.strategy,
+                         "is_long_term": 0, "cost": 0}
+                    )
                 # Update running state
                 balance = self.executor.get_balance()
                 self.balance_mgr.update(balance)
                 open_positions = self.executor.get_open_positions()
                 exposure = self.balance_mgr.portfolio_exposure(open_positions)
+                # Rebuild positions_for_risk with fresh DB positions + still-pending orders
+                # (exclude HP pending — fill-time enforcement)
+                still_pending = self.order_manager.get_pending_orders()
+                positions_for_risk = open_positions + [
+                    {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
+                     "is_long_term": 0, "cost": 0}
+                    for o in still_pending
+                    if o.get("strategy") != "high_probability"
+                ]
 
         # Check pending maker orders for fills/timeouts
         if self.order_manager.get_pending_orders():
@@ -243,7 +271,7 @@ class TradingEngine:
                 continue
 
             try:
-                result = self._gamma.get_market_resolution(market_id)
+                result = self._gamma.get_market_resolution(market_id, token_id=pos.get("token_id", ""))
             except Exception as e:
                 logger.debug(f"Failed to check resolution for position #{pos['id']}: {e}")
                 continue
@@ -295,25 +323,42 @@ class TradingEngine:
             self.balance_mgr.update(balance)
             logger.info(f"RESOLVED {resolved_count} positions | balance=${balance:.2f}")
 
-    def _resolve_predictions(self):
-        """Check unresolved predictions past their resolution_ts and update outcomes."""
+    def _resolve_predictions(self, max_markets_per_cycle: int = 50):
+        """Check unresolved predictions past their resolution_ts and update outcomes.
+
+        Deduplicates Gamma lookups by market_id and limits API calls per cycle.
+        """
         try:
             unresolved = self.trade_log.get_unresolved_predictions()
         except Exception:
             return
 
         now = time.time()
-        resolved_count = 0
-        for pred in unresolved:
-            resolution_ts = pred.get("resolution_ts")
-            if resolution_ts is None or now < resolution_ts + 30:
-                continue
+        # Filter to past-due predictions
+        past_due = [
+            p for p in unresolved
+            if p.get("resolution_ts") is not None and now >= p["resolution_ts"] + 30
+        ]
+        if not past_due:
+            return
 
-            market_id = pred["market_id"]
+        # Group by market_id to deduplicate Gamma API calls
+        by_market: dict[str, list[dict]] = defaultdict(list)
+        for pred in past_due:
+            by_market[pred["market_id"]].append(pred)
+
+        # Resolve up to max_markets_per_cycle unique markets per cycle
+        market_ids = list(by_market.keys())[:max_markets_per_cycle]
+        resolved_count = 0
+
+        for market_id in market_ids:
+            preds = by_market[market_id]
+            # Use first prediction's token_id for fallback lookup
+            token_id = preds[0].get("token_id", "")
             try:
-                result = self._gamma.get_market_resolution(market_id)
+                result = self._gamma.get_market_resolution(market_id, token_id=token_id)
             except Exception as e:
-                logger.debug(f"Failed to resolve prediction {pred['id']}: {e}")
+                logger.debug(f"Failed to resolve market {market_id[:20]}: {e}")
                 continue
 
             if result is None or not result.get("resolved"):
@@ -323,17 +368,21 @@ class TradingEngine:
             if winning_outcome is None:
                 continue
 
-            actual_correct = pred["outcome"].lower() == winning_outcome.lower()
-            pnl = None
-            if pred.get("traded") and pred.get("bid_price") is not None:
-                bid = pred["bid_price"]
-                pnl = (1.0 - bid) if actual_correct else -bid
+            # Apply resolution to all predictions for this market
+            for pred in preds:
+                actual_correct = pred["outcome"].lower() == winning_outcome.lower()
+                pnl = None
+                if pred.get("traded") and pred.get("bid_price") is not None:
+                    bid = pred["bid_price"]
+                    pnl = (1.0 - bid) if actual_correct else -bid
 
-            self.trade_log.resolve_prediction(pred["id"], actual_correct, pnl)
-            resolved_count += 1
+                self.trade_log.resolve_prediction(pred["id"], actual_correct, pnl)
+                resolved_count += 1
 
         if resolved_count > 0:
-            logger.info(f"PREDICTIONS | resolved {resolved_count} predictions")
+            logger.info(f"PREDICTIONS | resolved {resolved_count} predictions ({len(market_ids)}/{len(by_market)} markets checked)")
+        elif len(by_market) > max_markets_per_cycle:
+            logger.debug(f"PREDICTIONS | {len(by_market)} markets pending, checked {max_markets_per_cycle}")
 
         # Log calibration every 100 cycles
         if self._cycle_count % 100 == 0:

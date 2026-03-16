@@ -1,11 +1,24 @@
 import json
 import logging
 import time
+from datetime import datetime
 from src.strategies.base import Strategy
 from src.risk.risk_manager import TradeSignal
 from src.config.settings import Settings
 
 logger = logging.getLogger("poly-trade")
+
+
+def _parse_resolution_ts(market: dict) -> float:
+    """Extract resolution timestamp from Gamma market data."""
+    end_date = market.get("endDate", "")
+    if end_date:
+        try:
+            dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+            return dt.timestamp()
+        except (ValueError, TypeError):
+            pass
+    return 0.0
 
 
 def _parse_outcome_prices(market: dict) -> list[float]:
@@ -79,7 +92,11 @@ class HighProbabilityStrategy(Strategy):
 
             if is_longshot:
                 # Long-shots: always maker bids, never taker (spread is proportionally too big)
-                maker_price = round(bid + 0.01, 2) if bid > 0 else signal.price
+                # Skip empty books — bid <= 0.01 means no real market-maker is present
+                if bid <= 0.01:
+                    clob_out_of_range += 1
+                    continue
+                maker_price = round(bid + 0.01, 2)
                 if maker_price < self.longshot_min_price:
                     maker_price = self.longshot_min_price
                 if maker_price > self.longshot_threshold:
@@ -100,6 +117,8 @@ class HighProbabilityStrategy(Strategy):
                     order_type="GTC",
                     post_only=True,
                     cancel_after_ts=cancel_ts,
+                    resolution_ts=signal.resolution_ts,
+                    slug=signal.slug,
                 ))
             elif self.min_price <= ask <= self.max_price:
                 # Taker: buy at the ask
@@ -116,6 +135,8 @@ class HighProbabilityStrategy(Strategy):
                     strategy=self.name,
                     expected_value=ev,
                     order_type="GTC",
+                    resolution_ts=signal.resolution_ts,
+                    slug=signal.slug,
                 ))
             elif ask > self.max_price and self.min_price <= bid + 0.01 <= self.max_price:
                 # Ask above max (including no asks at 1.0) — place maker bid just above best bid
@@ -135,6 +156,8 @@ class HighProbabilityStrategy(Strategy):
                     order_type="GTC",
                     post_only=True,
                     cancel_after_ts=cancel_ts,
+                    resolution_ts=signal.resolution_ts,
+                    slug=signal.slug,
                 ))
             else:
                 clob_out_of_range += 1
@@ -210,6 +233,8 @@ class HighProbabilityStrategy(Strategy):
                 strategy=self.name,
                 expected_value=expected_value,
                 order_type="GTC",
+                resolution_ts=_parse_resolution_ts(market),
+                slug=market.get("_event_slug", ""),
             )
         return None
 

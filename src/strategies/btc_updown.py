@@ -172,11 +172,16 @@ class BtcUpdownStrategy(Strategy):
 
         dynamic_vol = delta_info.get("dynamic_vol", self.btc_5m_vol)
 
-        # Volatility regime scaling: require more edge when vol is high
+        # Volatility regime scaling: require more edge when vol is high (capped at 2x)
         vol_ratio = dynamic_vol / self.btc_5m_vol if self.btc_5m_vol > 0 else 1.0
-        effective_min_edge = self.min_edge * max(vol_ratio, 1.0)  # only widen, never shrink
+        vol_ratio = min(max(vol_ratio, 1.0), 2.0)
+        effective_min_edge = self.min_edge * vol_ratio
 
         resolution_ts = delta_info.get("resolution_ts", 0)
+
+        # Extract Gamma prices for fallback when CLOB book is empty
+        gamma_prices = self._extract_gamma_prices(market)
+        window_progress = delta_info.get("window_progress", 0.0)
 
         for i, outcome in enumerate(outcomes):
             if i >= len(tokens):
@@ -196,13 +201,31 @@ class BtcUpdownStrategy(Strategy):
             best_bid = price_data["bid"] if price_data else 0.0
             best_ask = price_data["ask"] if price_data else 1.0
 
+            # Gamma price fallback: when CLOB book is empty (spread > 0.90),
+            # use Gamma's bestBid/bestAsk for pricing
+            clob_spread = best_ask - best_bid
+            gamma_bid = gamma_prices.get(f"bid_{i}", 0.0)
+            gamma_ask = gamma_prices.get(f"ask_{i}", 1.0)
+            use_gamma_prices = clob_spread > 0.90 and gamma_bid > 0.01
+
+            if use_gamma_prices:
+                logger.info(
+                    f"btc_updown: CLOB empty for {asset} {outcome} "
+                    f"[{best_bid:.2f}/{best_ask:.2f}], using Gamma "
+                    f"[{gamma_bid:.2f}/{gamma_ask:.2f}]"
+                )
+
             est_prob = self._estimate_outcome_probability(
                 outcome, delta_info["delta_pct"], delta_info["window_progress"],
                 momentum, dynamic_vol
             )
 
-            # Smart bid placement using book depth
-            bid_price = self._get_smart_bid(est_prob, book)
+            # Smart bid placement using book depth + Gamma fallback
+            bid_price = self._get_smart_bid(
+                est_prob, book,
+                gamma_bid=gamma_bid if use_gamma_prices else None,
+                gamma_ask=gamma_ask if use_gamma_prices else None,
+            )
 
             # Build prediction record for every candidate
             pred = {
@@ -222,6 +245,44 @@ class BtcUpdownStrategy(Strategy):
                 "traded": False,
             }
 
+            # Late-window Gamma taker: when window nearly done with strong signal,
+            # take the Gamma ask directly if it's below our estimate
+            if (use_gamma_prices and window_progress > 0.70
+                    and est_prob > 0.65 and gamma_ask < est_prob - 0.01):
+                taker_price = gamma_ask
+                taker_ev = est_prob * (1.0 - taker_price) * (1.0 - self.taker_fee_rate) \
+                    - (1.0 - est_prob) * taker_price
+                if taker_ev > 0 and self.min_ask <= taker_price <= self.max_ask:
+                    taker_edge = est_prob - taker_price
+                    logger.info(
+                        f"btc_updown: TAKER {asset} {outcome} | ask=${taker_price:.2f} | "
+                        f"est_prob={est_prob:.2f} | edge={taker_edge:+.3f} | "
+                        f"EV={taker_ev:+.3f} (after {self.taker_fee_rate:.2%} fee) | "
+                        f"progress={window_progress:.2f}"
+                    )
+                    pred["traded"] = True
+                    pred["bid_price"] = taker_price
+                    predictions.append(pred)
+                    if taker_ev > best_ev:
+                        best_ev = taker_ev
+                        best_signal = TradeSignal(
+                            market_id=market_id,
+                            token_id=token_id,
+                            market_question=question,
+                            side="BUY",
+                            outcome=outcome,
+                            price=taker_price,
+                            confidence=est_prob,
+                            strategy=self.name,
+                            expected_value=taker_ev,
+                            order_type="GTC",
+                            post_only=False,
+                            cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
+                            resolution_ts=resolution_ts,
+                            slug=market.get("_event_slug", ""),
+                        )
+                    continue
+
             # Validate bid is in tradeable range
             if bid_price < self.min_ask or bid_price > self.max_ask:
                 logger.info(
@@ -231,8 +292,8 @@ class BtcUpdownStrategy(Strategy):
                 predictions.append(pred)
                 continue
 
-            # EV as maker (zero fee)
-            edge = est_prob - bid_price
+            # EV as maker (zero fee) — round edge to avoid float comparison issues
+            edge = round(est_prob - bid_price, 4)
             ev = est_prob * (1.0 - bid_price) - (1.0 - est_prob) * bid_price
 
             logger.info(
@@ -242,10 +303,13 @@ class BtcUpdownStrategy(Strategy):
                 f"eff_min_edge={effective_min_edge:.3f}"
             )
 
-            if edge < effective_min_edge or ev <= 0:
+            # When dynamic cushion is active (est_prob > 0.65 → cushion=0.02),
+            # relax edge threshold to match the tighter cushion
+            outcome_min_edge = min(effective_min_edge, 0.02) if est_prob > 0.65 else effective_min_edge
+            if edge < outcome_min_edge or ev <= 0:
                 logger.info(
                     f"btc_updown: skip {asset} {outcome} | edge={edge:+.3f} "
-                    f"(below min {effective_min_edge:.3f})"
+                    f"(below min {outcome_min_edge:.3f})"
                 )
                 predictions.append(pred)
                 continue
@@ -269,13 +333,28 @@ class BtcUpdownStrategy(Strategy):
                     post_only=True,
                     cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
                     resolution_ts=resolution_ts,
+                    slug=market.get("_event_slug", ""),
                 )
 
         return best_signal, predictions
 
-    def _get_smart_bid(self, est_prob: float, book, tick_size: float = 0.01) -> float:
-        """Place bid intelligently based on book state."""
-        fair_bid = round(est_prob - self.maker_edge_cushion, 2)
+    def _get_smart_bid(self, est_prob: float, book, tick_size: float = 0.01,
+                       gamma_bid: float | None = None,
+                       gamma_ask: float | None = None) -> float:
+        """Place bid intelligently based on book state and Gamma fallback."""
+        # Dynamic cushion: tighten for high-confidence signals
+        if est_prob > 0.65:
+            cushion = 0.02
+        else:
+            cushion = self.maker_edge_cushion
+        fair_bid = round(est_prob - cushion, 2)
+
+        # When Gamma prices available (CLOB empty), bid near Gamma best bid
+        if gamma_bid is not None and gamma_bid > 0.01:
+            # Bid at Gamma bid level or our fair_bid, whichever is lower (more conservative)
+            gamma_based_bid = round(gamma_bid, 2)
+            bid = min(fair_bid, gamma_based_bid)
+            return max(bid, 0.01)
 
         if book is None or not hasattr(book, 'asks') or not book.asks:
             return fair_bid
@@ -289,6 +368,51 @@ class BtcUpdownStrategy(Strategy):
                 return undercut_bid
 
         return fair_bid
+
+    @staticmethod
+    def _extract_gamma_prices(market: dict) -> dict:
+        """Extract bestBid/bestAsk per outcome index from Gamma market data."""
+        import json as _json
+        prices = {}
+        # Gamma provides bestBid/bestAsk at market level (for outcome 0)
+        # and outcomePrices as a JSON list
+        best_bid = market.get("bestBid")
+        best_ask = market.get("bestAsk")
+        if best_bid is not None:
+            try:
+                prices["bid_0"] = float(best_bid)
+            except (ValueError, TypeError):
+                pass
+        if best_ask is not None:
+            try:
+                prices["ask_0"] = float(best_ask)
+            except (ValueError, TypeError):
+                pass
+
+        # outcomePrices gives the last trade price per outcome
+        outcome_prices = market.get("outcomePrices")
+        if isinstance(outcome_prices, str):
+            try:
+                outcome_prices = _json.loads(outcome_prices)
+            except (ValueError, TypeError):
+                outcome_prices = []
+        if isinstance(outcome_prices, list):
+            for idx, p in enumerate(outcome_prices):
+                try:
+                    price = float(p)
+                    if f"bid_{idx}" not in prices:
+                        prices[f"bid_{idx}"] = max(price - 0.01, 0.01)
+                    if f"ask_{idx}" not in prices:
+                        prices[f"ask_{idx}"] = min(price + 0.01, 0.99)
+                except (ValueError, TypeError):
+                    continue
+
+        # For binary markets, derive outcome 1 from outcome 0
+        if "bid_0" in prices and "bid_1" not in prices:
+            prices["bid_1"] = round(max(1.0 - prices.get("ask_0", 1.0), 0.01), 2)
+            prices["ask_1"] = round(min(1.0 - prices.get("bid_0", 0.0), 0.99), 2)
+
+        return prices
 
     def _estimate_outcome_probability(self, outcome: str, delta_pct: float,
                                        window_progress: float, momentum: float,

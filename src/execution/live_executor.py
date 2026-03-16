@@ -1,22 +1,31 @@
 import logging
+import time
 from datetime import datetime, timezone
 from src.risk.risk_manager import ApprovedTrade
 from src.market_data.clob_client import PolymarketClobClient
 from src.storage.trade_log import TradeLog
 
+
+def _is_long_term(resolution_ts: float, threshold_days: int) -> bool:
+    return resolution_ts > 0 and resolution_ts - time.time() > threshold_days * 86400
+
 logger = logging.getLogger("poly-trade")
 
 
 class LiveExecutor:
-    def __init__(self, clob_client: PolymarketClobClient, trade_log: TradeLog, max_open_positions: int = 10):
+    def __init__(self, clob_client: PolymarketClobClient, trade_log: TradeLog, max_open_positions: int = 10,
+                 long_term_threshold_days: int = 7):
         self.clob = clob_client
         self.trade_log = trade_log
         self.max_open_positions = max_open_positions
+        self.long_term_threshold_days = long_term_threshold_days
 
     def execute(self, trade: ApprovedTrade) -> dict:
-        if len(self.get_open_positions()) >= self.max_open_positions:
-            logger.info(f"Live: rejected order — {self.max_open_positions} positions already open")
-            return {"status": "rejected", "reason": "max_positions_reached"}
+        if trade.signal.strategy != "arbitrage":
+            non_arb = [p for p in self.get_open_positions() if p.get("strategy") != "arbitrage"]
+            if len(non_arb) >= self.max_open_positions:
+                logger.info(f"Live: rejected order — {self.max_open_positions} positions already open")
+                return {"status": "rejected", "reason": "max_positions_reached"}
 
         try:
             result = self.clob.post_order(
@@ -66,6 +75,9 @@ class LiveExecutor:
                 "size": trade.size,
                 "cost": round(trade.cost, 4),
                 "paper_trade": False,
+                "resolution_ts": trade.signal.resolution_ts,
+                "is_long_term": 1 if _is_long_term(trade.signal.resolution_ts, self.long_term_threshold_days) else 0,
+                "slug": trade.signal.slug,
             }
             pos_id = self.trade_log.save_position(position)
         else:

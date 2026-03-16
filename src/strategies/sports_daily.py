@@ -60,6 +60,8 @@ class SportsDailyStrategy(Strategy):
         self.imbalance_threshold = settings.sports_daily_imbalance_threshold
         self.maker_cushion = settings.sports_daily_maker_cushion
         self.min_edge = settings.sports_daily_min_edge
+        self.max_spread = settings.sports_daily_max_spread
+        self.min_book_depth = settings.sports_daily_min_book_depth
         self.tags_to_search = settings.sports_daily_tags
         self._pending_predictions: list[dict] = []
 
@@ -92,45 +94,57 @@ class SportsDailyStrategy(Strategy):
                 q = market.get("question", "?")[:60]
                 logger.warning(f"sports_daily: error analyzing '{q}': {e}")
 
+        if not signals and sports_markets:
+            logger.info(
+                f"sports_daily: 0 signals from {len(sports_markets)} markets "
+                f"(check book depth and spread filters)"
+            )
+
         signals.sort(key=lambda s: s.expected_value, reverse=True)
         return signals
 
     # --- Market discovery ---
 
+    # Leagues to query via Gamma series_id (game-level markets)
+    GAME_LEAGUES = ["nba", "nfl", "mlb", "nhl", "ufc", "mls", "epl"]
+
     def _discover_sports_markets(self) -> list[dict]:
         """Find sports markets resolving within max_hours_to_resolution."""
         all_markets = []
 
-        # Try tag-based search for each configured tag (parallel pagination)
-        for tag in self.tags_to_search:
+        # Source 1 (primary): fetch game-level events by league series_id
+        # These are the actual daily game markets with real orderbooks
+        for league in self.GAME_LEAGUES:
             try:
-                events = self.gamma.get_all_events_by_tag(tag)
+                events = self.gamma.get_all_sports_game_events(league)
                 for event in events:
+                    title = event.get("title", "")
+                    slug = event.get("slug", "")
                     for m in event.get("markets", []):
-                        m["_event_title"] = event.get("title", "")
-                        m["_event_slug"] = event.get("slug", "")
+                        m["_event_title"] = title
+                        m["_event_slug"] = slug
                         all_markets.append(m)
             except Exception as e:
-                logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
+                logger.debug(f"sports_daily: league '{league}' fetch failed: {e}")
 
-        # Fallback: scan all active events and filter by keywords (paginate fully)
+        # Source 2 (fallback): tag-based search for non-game sports markets
+        # (futures, props not covered by series_id)
         if not all_markets:
-            try:
-                for page in range(30):
-                    events = self.gamma.get_active_events(limit=100, offset=page * 100)
-                    if not events:
-                        break
+            for tag in self.tags_to_search:
+                try:
+                    events = self.gamma.get_all_events_by_tag(tag)
                     for event in events:
                         title = event.get("title", "")
                         slug = event.get("slug", "")
                         tags = event.get("tags", [])
-                        if self._is_sports_event(title, slug, tags):
-                            for m in event.get("markets", []):
-                                m["_event_title"] = title
-                                m["_event_slug"] = slug
-                                all_markets.append(m)
-            except Exception as e:
-                logger.warning(f"sports_daily: fallback event scan failed: {e}")
+                        if not self._is_sports_event(title, slug, tags):
+                            continue
+                        for m in event.get("markets", []):
+                            m["_event_title"] = title
+                            m["_event_slug"] = slug
+                            all_markets.append(m)
+                except Exception as e:
+                    logger.debug(f"sports_daily: tag search '{tag}' failed: {e}")
 
         # Deduplicate by conditionId
         seen = set()
@@ -212,6 +226,7 @@ class SportsDailyStrategy(Strategy):
         tokens = market.get("clobTokenIds", [])
         market_id = market.get("conditionId", market.get("condition_id", ""))
         question = market.get("question", market.get("_event_title", ""))
+        slug = market.get("_event_slug", "")
 
         if len(outcomes) < 2 or len(tokens) < 2:
             return []
@@ -235,6 +250,31 @@ class SportsDailyStrategy(Strategy):
         bid_1 = prices[1]["bid"] if prices.get(1) else 0.0
         ask_1 = prices[1]["ask"] if prices.get(1) else 1.0
 
+        # Fallback: if CLOB book is empty (spread > 0.90), use Gamma-provided
+        # bestBid/bestAsk which come from Polymarket's internal matching engine
+        using_gamma_prices = False
+        gamma_bid = float(market.get("bestBid", 0) or 0)
+        gamma_ask = float(market.get("bestAsk", 0) or 0)
+        if gamma_bid > 0 and gamma_ask > 0:
+            if ask_0 - bid_0 > 0.90 and gamma_ask - gamma_bid < 0.90:
+                using_gamma_prices = True
+                bid_0 = gamma_bid
+                ask_0 = gamma_ask
+                # Complement side: infer from outcomePrices if available
+                outcome_prices = self._parse_json_field(market.get("outcomePrices", []))
+                if len(outcome_prices) >= 2:
+                    try:
+                        p1 = float(outcome_prices[1])
+                        bid_1 = max(p1 - 0.01, 0.01)
+                        ask_1 = min(p1 + 0.01, 0.99)
+                    except (ValueError, TypeError):
+                        pass
+                books = {}  # Clear CLOB books — using Gamma prices
+                logger.info(
+                    f"sports_daily: using Gamma prices for '{question[:40]}' "
+                    f"bid={bid_0:.2f} ask={ask_0:.2f} (CLOB book empty)"
+                )
+
         mid_0 = (bid_0 + ask_0) / 2 if bid_0 > 0 and ask_0 < 1.0 else bid_0 or ask_0
         mid_1 = (bid_1 + ask_1) / 2 if bid_1 > 0 and ask_1 < 1.0 else bid_1 or ask_1
 
@@ -245,6 +285,8 @@ class SportsDailyStrategy(Strategy):
         imbalance_0 = self._compute_book_imbalance(books.get(0))
         imbalance_1 = self._compute_book_imbalance(books.get(1))
 
+        volume = float(market.get("volume", 0) or 0)
+        liquidity = float(market.get("liquidity", 0) or 0)
         hours_remaining = market.get("_hours_remaining", 24.0)
 
         signals = []
@@ -256,6 +298,22 @@ class SportsDailyStrategy(Strategy):
             spread = spread_0 if i == 0 else spread_1
             imbalance = imbalance_0 if i == 0 else imbalance_1
             book = books.get(i)
+
+            # Gate: skip empty/illiquid books and excessively wide spreads
+            if spread > self.max_spread:
+                logger.info(
+                    f"sports_daily: skip {outcome} '{question[:40]}' spread={spread:.2f} > max={self.max_spread}"
+                )
+                continue
+            # Skip book depth check when using Gamma prices (no CLOB book available)
+            if not using_gamma_prices:
+                bid_depth, ask_depth = self._book_depth(book)
+                if not (bid_depth >= self.min_book_depth and ask_depth >= self.min_book_depth):
+                    logger.info(
+                        f"sports_daily: skip {outcome} '{question[:40]}' thin book "
+                        f"bid_depth=${bid_depth:.0f} ask_depth=${ask_depth:.0f} (min=${self.min_book_depth:.0f})"
+                    )
+                    continue
 
             pred = {
                 "strategy": self.name,
@@ -275,8 +333,10 @@ class SportsDailyStrategy(Strategy):
             sig = self._spread_capture_signal(
                 market_id, token_id, question, outcome,
                 bid, ask, mid, spread, book, hours_remaining,
+                volume=volume, liquidity=liquidity,
             )
             if sig:
+                sig.slug = slug
                 pred["traded"] = True
                 pred["signal_type"] = "spread_capture"
                 pred["bid_price"] = sig.price
@@ -288,8 +348,10 @@ class SportsDailyStrategy(Strategy):
             sig = self._book_imbalance_signal(
                 market_id, token_id, question, outcome,
                 bid, ask, mid, imbalance, book, hours_remaining,
+                volume=volume, liquidity=liquidity,
             )
             if sig:
+                sig.slug = slug
                 pred["traded"] = True
                 pred["signal_type"] = "book_imbalance"
                 pred["bid_price"] = sig.price
@@ -303,6 +365,7 @@ class SportsDailyStrategy(Strategy):
                 bid, ask, mid, book, hours_remaining,
             )
             if sig:
+                sig.slug = slug
                 pred["traded"] = True
                 pred["signal_type"] = "favorite_value"
                 pred["bid_price"] = sig.price
@@ -317,6 +380,7 @@ class SportsDailyStrategy(Strategy):
     def _spread_capture_signal(
         self, market_id, token_id, question, outcome,
         bid, ask, mid, spread, book, hours_remaining,
+        volume=0.0, liquidity=0.0,
     ) -> TradeSignal | None:
         """Generate signal when spread is wide enough to capture."""
         if spread < self.min_spread:
@@ -334,8 +398,11 @@ class SportsDailyStrategy(Strategy):
         if edge < self.min_edge:
             return None
 
-        # Confidence = midpoint (implied probability)
-        confidence = mid
+        # Confidence: midpoint + bonuses for volume, liquidity, spread quality
+        vol_bonus = min(volume / 20000, 1.0) * 0.05
+        liq_bonus = min(liquidity / 10000, 1.0) * 0.03
+        spread_quality = max(0, 1.0 - spread / 0.20) * 0.02
+        confidence = min(mid + vol_bonus + liq_bonus + spread_quality, 0.95)
         ev = confidence * (1.0 - our_bid) - (1.0 - confidence) * our_bid
 
         if ev <= 0:
@@ -366,11 +433,13 @@ class SportsDailyStrategy(Strategy):
             order_type="GTC",
             post_only=True,
             cancel_after_ts=cancel_ts,
+            resolution_ts=cancel_ts + 300,  # cancel_ts is 5min before resolution
         )
 
     def _book_imbalance_signal(
         self, market_id, token_id, question, outcome,
         bid, ask, mid, imbalance, book, hours_remaining,
+        volume=0.0, liquidity=0.0,
     ) -> TradeSignal | None:
         """Generate signal when order book is heavily skewed (informed flow)."""
         if abs(imbalance) < self.imbalance_threshold:
@@ -381,9 +450,11 @@ class SportsDailyStrategy(Strategy):
         if imbalance <= 0:
             return None  # only follow positive imbalance (bid side heavier)
 
-        # Adjusted probability: midpoint + boost from imbalance
-        boost = imbalance * 0.05  # up to 5% probability boost
-        adjusted_prob = min(mid + boost, 0.95)
+        # Adjusted probability: midpoint + boost from imbalance + vol/liq bonuses
+        boost = imbalance * 0.10  # up to 10% probability boost
+        vol_bonus = min(volume / 20000, 1.0) * 0.03
+        liq_bonus = min(liquidity / 10000, 1.0) * 0.02
+        adjusted_prob = min(mid + boost + vol_bonus + liq_bonus, 0.95)
 
         our_bid = round(adjusted_prob - self.maker_cushion, 2)
         if our_bid <= bid:
@@ -418,6 +489,7 @@ class SportsDailyStrategy(Strategy):
             order_type="GTC",
             post_only=True,
             cancel_after_ts=cancel_ts,
+            resolution_ts=cancel_ts + 300,
         )
 
     def _favorite_value_signal(
@@ -475,9 +547,39 @@ class SportsDailyStrategy(Strategy):
             order_type="GTC",
             post_only=True,
             cancel_after_ts=cancel_ts,
+            resolution_ts=cancel_ts + 300,
         )
 
     # --- Helpers ---
+
+    @staticmethod
+    def _book_depth(book) -> tuple[float, float]:
+        """Return (bid_dollar_depth, ask_dollar_depth) across top 5 levels."""
+        if book is None:
+            return 0.0, 0.0
+
+        bid_depth = 0.0
+        ask_depth = 0.0
+        if hasattr(book, 'bids') and book.bids:
+            for level in book.bids[:5]:
+                try:
+                    bid_depth += float(level.size) * float(level.price)
+                except (AttributeError, ValueError):
+                    pass
+        if hasattr(book, 'asks') and book.asks:
+            for level in book.asks[:5]:
+                try:
+                    ask_depth += float(level.size) * float(level.price)
+                except (AttributeError, ValueError):
+                    pass
+
+        return bid_depth, ask_depth
+
+    @staticmethod
+    def _is_book_liquid(book, min_depth: float) -> bool:
+        """Check if both sides of the book have sufficient dollar depth."""
+        bid_depth, ask_depth = SportsDailyStrategy._book_depth(book)
+        return bid_depth >= min_depth and ask_depth >= min_depth
 
     @staticmethod
     def _compute_book_imbalance(book) -> float:

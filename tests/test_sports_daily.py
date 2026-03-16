@@ -17,6 +17,8 @@ def make_settings(**overrides):
         "sports_daily_min_volume": 5000.0,
         "sports_daily_min_liquidity": 1000.0,
         "sports_daily_min_spread": 0.04,
+        "sports_daily_max_spread": 0.40,
+        "sports_daily_min_book_depth": 20.0,
         "sports_daily_max_hours_to_resolution": 24,
         "sports_daily_favorite_min_prob": 0.82,
         "sports_daily_favorite_max_prob": 0.95,
@@ -44,11 +46,11 @@ def make_mock_clob(bid=0.55, ask=0.65, book_bids=None, book_asks=None):
     if book_bids is not None:
         book.bids = [MagicMock(price=str(p), size=str(s)) for p, s in book_bids]
     else:
-        book.bids = [MagicMock(price=str(bid), size="100")]
+        book.bids = [MagicMock(price=str(bid), size="200")]
     if book_asks is not None:
         book.asks = [MagicMock(price=str(p), size=str(s)) for p, s in book_asks]
     else:
-        book.asks = [MagicMock(price=str(ask), size="100")]
+        book.asks = [MagicMock(price=str(ask), size="200")]
     mock.get_book.return_value = book
     # get_books_batch returns the same book for every requested token
     mock.get_books_batch.side_effect = lambda token_ids: {tid: book for tid in token_ids}
@@ -122,6 +124,7 @@ class TestSpreadCapture:
             question="Will Lakers win?", outcome="Yes",
             bid=0.55, ask=0.65, mid=0.60, spread=0.10,
             book=None, hours_remaining=6.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is not None
         assert sig.strategy == "sports_daily"
@@ -139,6 +142,7 @@ class TestSpreadCapture:
             question="Will Lakers win?", outcome="Yes",
             bid=0.58, ask=0.60, mid=0.59, spread=0.02,
             book=None, hours_remaining=6.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is None
 
@@ -150,6 +154,7 @@ class TestSpreadCapture:
             question="Q?", outcome="Yes",
             bid=0.55, ask=0.65, mid=0.60, spread=0.10,
             book=None, hours_remaining=6.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is not None
         assert sig.price > 0.55
@@ -162,6 +167,7 @@ class TestSpreadCapture:
             question="Q?", outcome="Yes",
             bid=0.50, ask=0.60, mid=0.55, spread=0.10,
             book=None, hours_remaining=3.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is not None
         assert sig.cancel_after_ts > time.time()
@@ -182,6 +188,7 @@ class TestBookImbalance:
             question="Will Lakers win?", outcome="Yes",
             bid=0.60, ask=0.70, mid=0.65, imbalance=0.60,
             book=None, hours_remaining=4.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is not None
         assert sig.strategy == "sports_daily"
@@ -195,6 +202,7 @@ class TestBookImbalance:
             question="Q?", outcome="Yes",
             bid=0.60, ask=0.66, mid=0.63, imbalance=0.15,
             book=None, hours_remaining=4.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is None
 
@@ -207,6 +215,7 @@ class TestBookImbalance:
             question="Q?", outcome="Yes",
             bid=0.60, ask=0.66, mid=0.63, imbalance=-0.50,
             book=None, hours_remaining=4.0,
+            volume=10000, liquidity=5000,
         )
         assert sig is None
 
@@ -299,6 +308,10 @@ class TestFavoriteValue:
 # --- Market discovery tests ---
 
 class TestMarketDiscovery:
+    def _mock_game_events(self, strategy, events):
+        """Mock primary game events source (series_id-based)."""
+        strategy.gamma.get_all_sports_game_events = MagicMock(return_value=events)
+
     def test_filters_by_resolution_time(self):
         strategy = make_strategy(sports_daily_max_hours_to_resolution=24)
 
@@ -308,7 +321,7 @@ class TestMarketDiscovery:
         bad_market = make_sports_market(hours_remaining=48.0)
         bad_market["conditionId"] = "cond2"
 
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        self._mock_game_events(strategy, [
             {
                 "title": "NBA: Lakers vs Celtics",
                 "slug": "nba-lakers",
@@ -323,7 +336,7 @@ class TestMarketDiscovery:
         strategy = make_strategy(sports_daily_min_volume=5000)
 
         low_vol = make_sports_market(volume=100, liquidity=5000)
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        self._mock_game_events(strategy, [
             {"title": "NBA Game", "slug": "nba", "markets": [low_vol]}
         ])
 
@@ -334,7 +347,7 @@ class TestMarketDiscovery:
         strategy = make_strategy(sports_daily_min_liquidity=1000)
 
         low_liq = make_sports_market(volume=10000, liquidity=100)
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        self._mock_game_events(strategy, [
             {"title": "NBA Game", "slug": "nba", "markets": [low_liq]}
         ])
 
@@ -345,21 +358,23 @@ class TestMarketDiscovery:
         strategy = make_strategy()
 
         market = make_sports_market()
-        # Same market appears in two tags
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        # Same market appears in two leagues
+        self._mock_game_events(strategy, [
             {"title": "NBA", "slug": "nba", "markets": [market, market]}
         ])
 
         markets = strategy._discover_sports_markets()
         assert len(markets) == 1
 
-    def test_fallback_keyword_search(self):
-        """Falls back to keyword search when tag search returns nothing."""
+    def test_fallback_tag_search(self):
+        """Falls back to tag search when game events return nothing."""
         strategy = make_strategy()
 
         market = make_sports_market()
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[])
-        strategy.gamma.get_active_events = MagicMock(return_value=[
+        # Primary source returns empty
+        self._mock_game_events(strategy, [])
+        # Fallback tag search finds the market
+        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
             {
                 "title": "NBA: Lakers vs Celtics",
                 "slug": "nba-lakers",
@@ -427,7 +442,7 @@ class TestIntegration:
         )
 
         market = make_sports_market()
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        strategy.gamma.get_all_sports_game_events = MagicMock(return_value=[
             {"title": "NBA Game", "slug": "nba", "markets": [market]}
         ])
 
@@ -445,7 +460,7 @@ class TestIntegration:
         strategy = make_strategy()
 
         market = make_sports_market()
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
+        strategy.gamma.get_all_sports_game_events = MagicMock(return_value=[
             {"title": "NBA Game", "slug": "nba", "markets": [market]}
         ])
 
@@ -465,6 +480,124 @@ class TestIntegration:
 
 
 # --- Aggression tuner integration ---
+
+class TestBookLiquidity:
+    def test_empty_book(self):
+        """Empty book (no bids/asks) should be illiquid."""
+        book = MagicMock()
+        book.bids = []
+        book.asks = []
+        assert not SportsDailyStrategy._is_book_liquid(book, 50.0)
+
+    def test_liquid_book(self):
+        """Book with sufficient depth on both sides passes."""
+        book = MagicMock()
+        book.bids = [MagicMock(price="0.50", size="200"), MagicMock(price="0.49", size="100")]
+        book.asks = [MagicMock(price="0.55", size="200"), MagicMock(price="0.56", size="100")]
+        # bid_depth = 200*0.50 + 100*0.49 = 149, ask_depth = 200*0.55 + 100*0.56 = 166
+        assert SportsDailyStrategy._is_book_liquid(book, 50.0)
+
+    def test_one_sided_book(self):
+        """Book with bids but no asks should be illiquid."""
+        book = MagicMock()
+        book.bids = [MagicMock(price="0.50", size="200")]
+        book.asks = []
+        assert not SportsDailyStrategy._is_book_liquid(book, 50.0)
+
+    def test_none_book(self):
+        """None book should be illiquid."""
+        assert not SportsDailyStrategy._is_book_liquid(None, 50.0)
+
+    def test_thin_book_below_threshold(self):
+        """Book with tiny sizes should fail the depth check."""
+        book = MagicMock()
+        book.bids = [MagicMock(price="0.01", size="1")]
+        book.asks = [MagicMock(price="0.99", size="1")]
+        # bid_depth = 0.01, ask_depth = 0.99 — bid side too thin
+        assert not SportsDailyStrategy._is_book_liquid(book, 50.0)
+
+
+class TestSpreadCaptureConfidence:
+    def test_confidence_above_threshold_with_volume(self):
+        """50/50 market with good volume/liquidity should produce confidence >= 0.55."""
+        strategy = make_strategy(sports_daily_min_spread=0.04, sports_daily_maker_cushion=0.02)
+        sig = strategy._spread_capture_signal(
+            market_id="c1", token_id="t1",
+            question="Will Team A win?", outcome="Yes",
+            bid=0.45, ask=0.55, mid=0.50, spread=0.10,
+            book=None, hours_remaining=6.0,
+            volume=10000, liquidity=5000,
+        )
+        assert sig is not None
+        assert sig.confidence >= 0.55
+
+    def test_confidence_capped_at_095(self):
+        """Confidence should never exceed 0.95."""
+        strategy = make_strategy(sports_daily_min_spread=0.04, sports_daily_maker_cushion=0.02)
+        sig = strategy._spread_capture_signal(
+            market_id="c1", token_id="t1",
+            question="Q?", outcome="Yes",
+            bid=0.88, ask=0.98, mid=0.93, spread=0.10,
+            book=None, hours_remaining=6.0,
+            volume=50000, liquidity=50000,
+        )
+        assert sig is not None
+        assert sig.confidence <= 0.95
+
+    def test_low_volume_keeps_low_confidence(self):
+        """50/50 market with zero volume stays under 0.55."""
+        strategy = make_strategy(sports_daily_min_spread=0.04, sports_daily_maker_cushion=0.02)
+        sig = strategy._spread_capture_signal(
+            market_id="c1", token_id="t1",
+            question="Q?", outcome="Yes",
+            bid=0.45, ask=0.55, mid=0.50, spread=0.10,
+            book=None, hours_remaining=6.0,
+            volume=0, liquidity=0,
+        )
+        # With mid=0.50 and no bonuses, confidence=0.50 + spread_quality only
+        # spread_quality = max(0, 1.0 - 0.10/0.20) * 0.02 = 0.01 → confidence=0.51
+        # This should still produce a signal (EV check), but confidence < 0.55
+        if sig is not None:
+            assert sig.confidence < 0.55
+
+
+class TestBookImbalanceConfidence:
+    def test_strong_imbalance_passes_threshold(self):
+        """Strong imbalance on 50/50 market with volume should produce confidence >= 0.55."""
+        strategy = make_strategy(
+            sports_daily_imbalance_threshold=0.30,
+            sports_daily_maker_cushion=0.02,
+            sports_daily_min_edge=0.01,
+        )
+        sig = strategy._book_imbalance_signal(
+            market_id="c1", token_id="t1",
+            question="Q?", outcome="Yes",
+            bid=0.45, ask=0.55, mid=0.50, imbalance=0.60,
+            book=None, hours_remaining=4.0,
+            volume=10000, liquidity=5000,
+        )
+        assert sig is not None
+        assert sig.confidence >= 0.55
+
+    def test_imbalance_boost_stronger_than_before(self):
+        """Imbalance boost is now 0.10 per unit (was 0.05)."""
+        strategy = make_strategy(
+            sports_daily_imbalance_threshold=0.30,
+            sports_daily_maker_cushion=0.02,
+            sports_daily_min_edge=0.01,
+        )
+        sig = strategy._book_imbalance_signal(
+            market_id="c1", token_id="t1",
+            question="Q?", outcome="Yes",
+            bid=0.60, ask=0.70, mid=0.65, imbalance=0.50,
+            book=None, hours_remaining=4.0,
+            volume=10000, liquidity=5000,
+        )
+        assert sig is not None
+        # boost = 0.50 * 0.10 = 0.05, vol_bonus ~0.015, liq_bonus ~0.01
+        # adjusted = 0.65 + 0.05 + 0.015 + 0.01 = 0.725
+        assert sig.confidence > 0.70
+
 
 class TestAggressionTuner:
     def test_sports_daily_in_all_levels(self):

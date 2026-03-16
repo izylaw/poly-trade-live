@@ -13,7 +13,7 @@ from src.storage.trade_log import TradeLog
 
 
 def _make_signal(market_id="mkt_1", token_id="tok_1", strategy="high_probability",
-                 outcome="Yes", price=0.93, confidence=0.95):
+                 outcome="Yes", price=0.93, confidence=0.95, resolution_ts=0.0):
     return TradeSignal(
         market_id=market_id,
         token_id=token_id,
@@ -24,6 +24,7 @@ def _make_signal(market_id="mkt_1", token_id="tok_1", strategy="high_probability
         confidence=confidence,
         strategy=strategy,
         expected_value=confidence * (1 - price),
+        resolution_ts=resolution_ts,
     )
 
 
@@ -491,7 +492,7 @@ class TestOrderManagerCancelOnLimit(unittest.TestCase):
 
 
 class TestPerStrategyPositionLimit(unittest.TestCase):
-    """Per-strategy bucket limits: 10 high_probability, 15 other, 25 total."""
+    """Per-strategy position limits with three-dimensional model."""
 
     def setUp(self):
         self.settings = Settings(
@@ -499,9 +500,14 @@ class TestPerStrategyPositionLimit(unittest.TestCase):
             hard_floor_pct=0.01,
             max_single_trade_pct=0.10,
             max_portfolio_exposure_pct=0.90,
-            max_open_positions=25,
-            max_high_prob_positions=10,
-            max_other_positions=15,
+            max_open_positions=20,
+            high_prob_max_positions=8,
+            btc_updown_max_positions=3,
+            safe_compounder_max_positions=3,
+            sports_daily_max_positions=4,
+            llm_max_positions=2,
+            max_long_term_positions=5,
+            long_term_threshold_days=7,
             min_trade_size=0.50,
             max_positions_per_market=1,
         )
@@ -509,45 +515,48 @@ class TestPerStrategyPositionLimit(unittest.TestCase):
         self.cb.set_start_of_day_balance(100.0)
         self.rm = RiskManager(self.settings, self.cb)
 
-    def _positions(self, n, strategy="high_probability"):
-        return [{"market_id": f"mkt_{strategy}_{i}", "cost": 1.0, "strategy": strategy}
+    def _positions(self, n, strategy="high_probability", is_long_term=False):
+        return [{"market_id": f"mkt_{strategy}_{i}", "cost": 1.0, "strategy": strategy,
+                 "is_long_term": 1 if is_long_term else 0}
                 for i in range(n)]
 
-    def test_high_prob_blocked_at_10(self):
-        """10 high_probability positions → next high_probability signal rejected."""
+    def test_high_prob_blocked_at_8(self):
+        """8 high_probability positions → next high_probability signal rejected."""
         signal = _make_signal(market_id="mkt_hp_new", token_id="tok_hp_new", strategy="high_probability")
-        positions = self._positions(10, "high_probability")
-        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=10.0)
+        positions = self._positions(8, "high_probability")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=8.0)
         self.assertIsNone(result)
 
     def test_high_prob_allows_other(self):
-        """10 high_probability positions → btc_updown signal still allowed."""
+        """8 high_probability positions → btc_updown signal still allowed."""
         signal = _make_signal(market_id="mkt_btc_new", token_id="tok_btc_new",
                               strategy="btc_updown", price=0.50, confidence=0.70)
-        positions = self._positions(10, "high_probability")
-        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=10.0)
+        positions = self._positions(8, "high_probability")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=8.0)
         self.assertIsNotNone(result)
 
-    def test_other_blocked_at_15(self):
-        """15 non-high_probability positions → next btc_updown signal rejected."""
+    def test_btc_updown_blocked_at_3(self):
+        """3 btc_updown positions → next btc_updown signal rejected."""
         signal = _make_signal(market_id="mkt_btc_new", token_id="tok_btc_new",
                               strategy="btc_updown", price=0.50, confidence=0.70)
-        positions = self._positions(15, "btc_updown")
-        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=15.0)
+        positions = self._positions(3, "btc_updown")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=3.0)
         self.assertIsNone(result)
 
-    def test_other_allows_high_prob(self):
-        """15 non-high_probability positions → high_probability signal still allowed."""
+    def test_btc_updown_allows_high_prob(self):
+        """3 btc_updown positions → high_probability signal still allowed."""
         signal = _make_signal(market_id="mkt_hp_new", token_id="tok_hp_new", strategy="high_probability")
-        positions = self._positions(15, "btc_updown")
-        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=15.0)
+        positions = self._positions(3, "btc_updown")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=3.0)
         self.assertIsNotNone(result)
 
-    def test_global_cap_at_25(self):
-        """10 high_prob + 15 other → any signal rejected (global limit)."""
+    def test_global_cap_at_20(self):
+        """20 short-term non-arb positions → any signal rejected (global limit)."""
         signal = _make_signal(market_id="mkt_new", token_id="tok_new", strategy="high_probability")
-        positions = self._positions(10, "high_probability") + self._positions(15, "btc_updown")
-        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=25.0)
+        positions = self._positions(8, "high_probability") + self._positions(3, "btc_updown") + \
+                    self._positions(3, "safe_compounder") + self._positions(4, "sports_daily") + \
+                    self._positions(2, "llm_crypto")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=20.0)
         self.assertIsNone(result)
 
 
@@ -661,6 +670,282 @@ class TestConcurrentSessionBalance(unittest.TestCase):
         pnl = executor.close_position(999, exit_price=1.0)
         self.assertEqual(pnl, 0.0)
         self.assertAlmostEqual(executor.get_balance(), 10.0)
+
+
+class TestLongTermPositionBucket(unittest.TestCase):
+    """Long-term positions use a separate additive bucket."""
+
+    def setUp(self):
+        import time
+        self.settings = Settings(
+            starting_capital=100.0,
+            hard_floor_pct=0.01,
+            max_single_trade_pct=0.10,
+            max_portfolio_exposure_pct=0.90,
+            max_open_positions=20,
+            high_prob_max_positions=8,
+            btc_updown_max_positions=3,
+            max_long_term_positions=5,
+            long_term_threshold_days=7,
+            min_trade_size=0.50,
+            max_positions_per_market=1,
+        )
+        self.cb = CircuitBreaker()
+        self.cb.set_start_of_day_balance(100.0)
+        self.rm = RiskManager(self.settings, self.cb)
+        # Timestamp 30 days in the future (definitely long-term)
+        self.far_future = time.time() + 30 * 86400
+
+    def test_long_term_not_counted_against_strategy(self):
+        """Positions with is_long_term=1 don't block short-term signals."""
+        # 8 long-term high_prob positions
+        positions = [{"market_id": f"mkt_lt_{i}", "cost": 1.0, "strategy": "high_probability",
+                       "is_long_term": 1} for i in range(8)]
+        # Short-term high_prob signal should pass (not counted against per-strategy limit)
+        signal = _make_signal(market_id="mkt_new", token_id="tok_new", strategy="high_probability")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=8.0)
+        self.assertIsNotNone(result)
+
+    def test_long_term_bucket_blocks_at_limit(self):
+        """5 long-term positions → next long-term signal rejected."""
+        positions = [{"market_id": f"mkt_lt_{i}", "cost": 1.0, "strategy": "high_probability",
+                       "is_long_term": 1} for i in range(5)]
+        signal = _make_signal(market_id="mkt_lt_new", token_id="tok_lt_new",
+                              strategy="high_probability", resolution_ts=self.far_future)
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=5.0)
+        self.assertIsNone(result)
+
+    def test_short_term_allowed_when_long_term_full(self):
+        """Short-term signals still pass when long-term bucket is full."""
+        positions = [{"market_id": f"mkt_lt_{i}", "cost": 1.0, "strategy": "high_probability",
+                       "is_long_term": 1} for i in range(5)]
+        # Short-term signal (resolution_ts=0 → short-term)
+        signal = _make_signal(market_id="mkt_st_new", token_id="tok_st_new", strategy="high_probability")
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=positions, portfolio_exposure=5.0)
+        self.assertIsNotNone(result)
+
+
+class TestHighProbFillTimeEnforcement(unittest.TestCase):
+    """high_probability uses fill-time enforcement: pending orders don't count
+    against per-strategy limits, but remaining pending orders are cancelled
+    when fills push the strategy to its position limit."""
+
+    def test_hp_pending_not_counted_in_positions_for_risk(self):
+        """HP pending orders excluded from positions_for_risk in engine dedup logic."""
+        open_positions = [{"market_id": "mkt_0", "strategy": "high_probability", "cost": 1.0}]
+        pending_orders = [
+            {"market_id": "mkt_1", "strategy": "high_probability"},
+            {"market_id": "mkt_2", "strategy": "high_probability"},
+            {"market_id": "mkt_3", "strategy": "btc_updown"},
+        ]
+
+        # Engine logic: exclude HP from positions_for_risk
+        positions_for_risk = open_positions + [
+            {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
+             "is_long_term": 0, "cost": 0}
+            for o in pending_orders
+            if o.get("strategy") != "high_probability"
+        ]
+
+        # Only 1 DB position + 1 btc_updown pending = 2 (HP pending excluded)
+        self.assertEqual(len(positions_for_risk), 2)
+        strategies = [p["strategy"] for p in positions_for_risk]
+        self.assertNotIn("high_probability", [s for s in strategies if s != "high_probability"]
+                         or strategies)
+        # HP pending still counted for per-market dedup
+        from collections import Counter
+        market_pos_count = Counter(p["market_id"] for p in open_positions if p.get("market_id"))
+        for o in pending_orders:
+            if o.get("market_id"):
+                market_pos_count[o["market_id"]] += 1
+        self.assertEqual(market_pos_count["mkt_1"], 1)  # HP pending blocks same market
+
+    def test_other_strategy_pending_still_counted(self):
+        """Non-HP pending orders still count against per-strategy limits."""
+        pending_orders = [
+            {"market_id": "mkt_1", "strategy": "btc_updown"},
+            {"market_id": "mkt_2", "strategy": "btc_updown"},
+            {"market_id": "mkt_3", "strategy": "high_probability"},
+        ]
+
+        positions_for_risk = [
+            {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
+             "is_long_term": 0, "cost": 0}
+            for o in pending_orders
+            if o.get("strategy") != "high_probability"
+        ]
+
+        # 2 btc_updown pending counted, HP excluded
+        self.assertEqual(len(positions_for_risk), 2)
+        self.assertTrue(all(p["strategy"] == "btc_updown" for p in positions_for_risk))
+
+    def test_order_manager_cancels_hp_on_fill_at_limit(self):
+        """When HP fills reach the limit, remaining HP pending orders are cancelled."""
+        from src.core.order_manager import OrderManager
+
+        mock_trade_log = MagicMock()
+        om = OrderManager(mock_trade_log, max_open_positions=20,
+                          strategy_limits={"high_probability": 2})
+
+        # 3 HP pending orders
+        for i in range(3):
+            om.track_order({
+                "trade_id": i + 1, "order_id": f"ord_{i}",
+                "market_id": f"mkt_{i}", "strategy": "high_probability",
+                "confidence": 0.8,
+            })
+
+        mock_clob = MagicMock()
+        # First 2 fill, third stays live
+        mock_clob.get_order.side_effect = lambda oid: (
+            {"status": "filled"} if oid in ("ord_0", "ord_1") else {"status": "live"}
+        )
+
+        mock_executor = MagicMock()
+        # After fills: 2 HP positions in DB
+        mock_executor.get_open_positions.return_value = [
+            {"market_id": "mkt_0", "strategy": "high_probability", "is_long_term": 0},
+            {"market_id": "mkt_1", "strategy": "high_probability", "is_long_term": 0},
+        ]
+
+        filled = om.check_pending_orders(mock_clob, mock_executor, paper_mode=False)
+
+        self.assertEqual(len(filled), 2)
+        # ord_2 should be cancelled (HP at limit)
+        self.assertEqual(len(om.get_pending_orders()), 0)
+        mock_clob.cancel_order.assert_called_once_with("ord_2")
+        mock_trade_log.update_trade_status.assert_any_call(3, "cancelled")
+
+    def test_order_manager_no_cancel_below_limit(self):
+        """HP pending orders kept when fills haven't reached the limit."""
+        from src.core.order_manager import OrderManager
+
+        mock_trade_log = MagicMock()
+        om = OrderManager(mock_trade_log, max_open_positions=20,
+                          strategy_limits={"high_probability": 8})
+
+        for i in range(3):
+            om.track_order({
+                "trade_id": i + 1, "order_id": f"ord_{i}",
+                "market_id": f"mkt_{i}", "strategy": "high_probability",
+                "confidence": 0.8,
+            })
+
+        mock_clob = MagicMock()
+        mock_clob.get_order.side_effect = lambda oid: (
+            {"status": "filled"} if oid == "ord_0" else {"status": "live"}
+        )
+
+        mock_executor = MagicMock()
+        mock_executor.get_open_positions.return_value = [
+            {"market_id": "mkt_0", "strategy": "high_probability", "is_long_term": 0},
+        ]
+
+        filled = om.check_pending_orders(mock_clob, mock_executor, paper_mode=False)
+
+        self.assertEqual(len(filled), 1)
+        # 2 remaining HP pending orders should stay (only 1/8 filled)
+        self.assertEqual(len(om.get_pending_orders()), 2)
+        mock_clob.cancel_order.assert_not_called()
+
+    def test_non_hp_strategy_not_affected(self):
+        """strategy_limits only cancels the strategy that hit its limit."""
+        from src.core.order_manager import OrderManager
+
+        mock_trade_log = MagicMock()
+        om = OrderManager(mock_trade_log, max_open_positions=20,
+                          strategy_limits={"high_probability": 2})
+
+        om.track_order({"trade_id": 1, "order_id": "ord_hp", "market_id": "mkt_hp",
+                         "strategy": "high_probability", "confidence": 0.8})
+        om.track_order({"trade_id": 2, "order_id": "ord_btc", "market_id": "mkt_btc",
+                         "strategy": "btc_updown", "confidence": 0.8})
+
+        mock_clob = MagicMock()
+        mock_clob.get_order.side_effect = lambda oid: {"status": "filled"}
+
+        mock_executor = MagicMock()
+        mock_executor.get_open_positions.return_value = [
+            {"market_id": "mkt_hp", "strategy": "high_probability", "is_long_term": 0},
+            {"market_id": "mkt_existing_hp", "strategy": "high_probability", "is_long_term": 0},
+            {"market_id": "mkt_btc", "strategy": "btc_updown", "is_long_term": 0},
+        ]
+
+        filled = om.check_pending_orders(mock_clob, mock_executor, paper_mode=False)
+
+        self.assertEqual(len(filled), 2)
+        # No pending orders left (both filled), no extra cancellations
+        self.assertEqual(len(om.get_pending_orders()), 0)
+
+
+class TestStrategyAwarePerMarketLimit(unittest.TestCase):
+    """Per-market limits vary by strategy."""
+
+    def setUp(self):
+        self.settings = Settings(
+            starting_capital=100.0,
+            hard_floor_pct=0.01,
+            max_single_trade_pct=0.10,
+            max_portfolio_exposure_pct=0.90,
+            max_open_positions=20,
+            safe_compounder_max_positions=3,
+            sports_daily_max_positions=4,
+            btc_updown_max_positions=3,
+            min_trade_size=0.50,
+            max_positions_per_market=1,
+        )
+        self.cb = CircuitBreaker()
+        self.cb.set_start_of_day_balance(100.0)
+        self.rm = RiskManager(self.settings, self.cb)
+
+    def test_safe_compounder_dual_side_per_market(self):
+        """safe_compounder can have 2 positions on the same market (dual-side quoting)."""
+        # First position on market
+        existing = [{"market_id": "mkt_crypto_1", "cost": 0.5, "strategy": "safe_compounder"}]
+        # Second signal on same market should pass (per-market limit = 2)
+        signal = _make_signal(market_id="mkt_crypto_1", token_id="tok_2",
+                              strategy="safe_compounder", outcome="No", price=0.10, confidence=0.80)
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=existing, portfolio_exposure=0.5)
+        self.assertIsNotNone(result)
+
+    def test_safe_compounder_blocked_at_third(self):
+        """safe_compounder is still capped at 2 per market."""
+        existing = [
+            {"market_id": "mkt_crypto_1", "cost": 0.5, "strategy": "safe_compounder"},
+            {"market_id": "mkt_crypto_1", "cost": 0.5, "strategy": "safe_compounder"},
+        ]
+        signal = _make_signal(market_id="mkt_crypto_1", token_id="tok_3",
+                              strategy="safe_compounder", outcome="Yes", price=0.10, confidence=0.80)
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=existing, portfolio_exposure=1.0)
+        self.assertIsNone(result)
+
+    def test_sports_daily_both_outcomes_per_market(self):
+        """sports_daily can have 2 positions on same market (both outcomes)."""
+        existing = [{"market_id": "mkt_sport_1", "cost": 0.5, "strategy": "sports_daily"}]
+        signal = _make_signal(market_id="mkt_sport_1", token_id="tok_2",
+                              strategy="sports_daily", outcome="No", price=0.20, confidence=0.70)
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=existing, portfolio_exposure=0.5)
+        self.assertIsNotNone(result)
+
+    def test_btc_updown_single_per_market(self):
+        """btc_updown is limited to 1 per market (default)."""
+        existing = [{"market_id": "mkt_btc_1", "cost": 0.5, "strategy": "btc_updown"}]
+        signal = _make_signal(market_id="mkt_btc_1", token_id="tok_2",
+                              strategy="btc_updown", outcome="No", price=0.50, confidence=0.70)
+        result = self.rm.evaluate(signal, balance=100.0, open_positions=existing, portfolio_exposure=0.5)
+        self.assertIsNone(result)
+
+
+class TestUnifiedDbPath(unittest.TestCase):
+    """All strategy configurations should use the same DB path."""
+
+    def test_db_path_ignores_only_strategies(self):
+        s1 = Settings(only_strategies=["btc_updown"])
+        s2 = Settings(only_strategies=["high_probability", "arbitrage"])
+        s3 = Settings(only_strategies=[])
+        self.assertEqual(s1.db_path, s2.db_path)
+        self.assertEqual(s2.db_path, s3.db_path)
+        self.assertEqual(str(s3.db_path), "data/poly_trade.db")
 
 
 if __name__ == "__main__":

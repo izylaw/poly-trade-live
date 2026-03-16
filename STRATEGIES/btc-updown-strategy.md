@@ -97,6 +97,10 @@ btc_updown_max_ask: 0.85          # max bid price to consider
 btc_updown_maker_edge_cushion: 0.05  # fair_bid = est_prob - cushion
 ```
 
+## Position Limits
+- Per-strategy cap: 3
+- Per-market limit: 1
+
 ## Risk
 - GTC maker orders with `post_only=True` (no taker fees)
 - Strategy-specific min_confidence: 0.55 (overrides aggression tuner level)

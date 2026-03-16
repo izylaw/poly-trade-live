@@ -474,6 +474,7 @@ class LLMCryptoStrategy(Strategy):
                 post_only=True,
                 cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
                 resolution_ts=resolution_ts,
+                slug=market_data.get("_market", {}).get("_event_slug", ""),
             ))
 
         return signals

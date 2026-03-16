@@ -52,8 +52,9 @@ class TradeLog:
         cur = self.conn.execute(
             """INSERT INTO positions
                (market_id, token_id, outcome, market_question, strategy,
-                entry_price, size, cost, current_price, status, opened_at, paper_trade)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                entry_price, size, cost, current_price, status, opened_at, paper_trade,
+                resolution_ts, is_long_term, slug)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos["market_id"],
                 pos["token_id"],
@@ -67,6 +68,9 @@ class TradeLog:
                 "open",
                 datetime.now(timezone.utc).isoformat(),
                 1 if pos.get("paper_trade", True) else 0,
+                pos.get("resolution_ts", 0),
+                1 if pos.get("is_long_term") else 0,
+                pos.get("slug", ""),
             ),
         )
         self.conn.commit()
