@@ -81,6 +81,15 @@ class Settings(BaseSettings):
     btc_updown_taker_fee_rate: float = DEFAULTS["btc_updown_taker_fee_rate"]
     btc_updown_maker_edge_cushion: float = DEFAULTS["btc_updown_maker_edge_cushion"]
 
+    # Crypto Hourly strategy
+    crypto_hourly_assets: list[str] = DEFAULTS["crypto_hourly_assets"]
+    crypto_hourly_intervals: list[str] = DEFAULTS["crypto_hourly_intervals"]
+    crypto_hourly_min_edge: float = DEFAULTS["crypto_hourly_min_edge"]
+    crypto_hourly_min_ask: float = DEFAULTS["crypto_hourly_min_ask"]
+    crypto_hourly_max_ask: float = DEFAULTS["crypto_hourly_max_ask"]
+    crypto_hourly_maker_edge_cushion: float = DEFAULTS["crypto_hourly_maker_edge_cushion"]
+    crypto_hourly_max_positions: int = DEFAULTS["crypto_hourly_max_positions"]
+
     # Safe Compounder strategy
     safe_compounder_assets: list[str] = DEFAULTS["safe_compounder_assets"]
     safe_compounder_intervals: list[str] = DEFAULTS["safe_compounder_intervals"]

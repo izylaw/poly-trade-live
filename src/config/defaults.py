@@ -57,7 +57,7 @@ DEFAULTS = {
 
     # BTC Up/Down strategy (v2 — price delta model)
     "btc_updown_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
-    "btc_updown_intervals": ["5m", "15m", "1h"],
+    "btc_updown_intervals": ["5m", "15m"],
     "btc_updown_min_edge": 0.03,          # min (est_prob - ask) to trade
     "btc_updown_5m_vol": 0.0025,          # mixed-crypto 5-min volatility baseline
     "btc_updown_logistic_k": 1.5,         # logistic steepness
@@ -66,6 +66,15 @@ DEFAULTS = {
     "btc_updown_max_ask": 0.85,           # max ask price to consider
     "btc_updown_taker_fee_rate": 0.0625,  # Polymarket dynamic taker fee rate
     "btc_updown_maker_edge_cushion": 0.05,  # bid = est_prob - cushion
+
+    # Crypto Hourly strategy (1h intervals, inherits btc_updown logic)
+    "crypto_hourly_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
+    "crypto_hourly_intervals": ["1h"],
+    "crypto_hourly_min_edge": 0.03,
+    "crypto_hourly_min_ask": 0.03,
+    "crypto_hourly_max_ask": 0.85,
+    "crypto_hourly_maker_edge_cushion": 0.05,
+    "crypto_hourly_max_positions": 5,
 
     # Safe Compounder strategy
     "safe_compounder_assets": ["BTC", "ETH", "SOL"],
