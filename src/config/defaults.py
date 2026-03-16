@@ -17,7 +17,7 @@ DEFAULTS = {
     "consecutive_loss_pause": 3,
     "max_positions_per_market": 1,
     "high_prob_max_positions": 8,
-    "btc_updown_max_positions": 3,
+    "btc_updown_max_positions": 5,
     "llm_max_positions": 2,
     "max_long_term_positions": 5,
     "long_term_threshold_days": 7,

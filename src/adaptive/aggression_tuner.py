@@ -15,7 +15,7 @@ class AggressionLevel:
 
 
 LEVELS = {
-    "conservative": AggressionLevel("conservative", 0.05, 0.85, ["high_probability", "arbitrage", "safe_compounder", "sports_daily"]),
+    "conservative": AggressionLevel("conservative", 0.05, 0.85, ["high_probability", "arbitrage", "btc_updown", "safe_compounder", "sports_daily"]),
     "moderate": AggressionLevel("moderate", 0.10, 0.70, ["high_probability", "arbitrage", "btc_updown", "safe_compounder", "sports_daily", "llm_crypto"]),
     "aggressive": AggressionLevel("aggressive", 0.15, 0.60, ["high_probability", "arbitrage", "btc_updown", "safe_compounder", "sports_daily", "llm_crypto"]),
     "ultra": AggressionLevel("ultra", 0.15, 0.55, ["high_probability", "arbitrage", "btc_updown", "safe_compounder", "sports_daily", "llm_crypto"]),
