@@ -163,7 +163,7 @@ class GammaClient:
         resp = requests.get(
             f"{GAMMA_API_URL}/events",
             params={"limit": limit, "offset": offset, "active": True,
-                    "closed": False, "tag": tag},
+                    "closed": False, "tag_slug": tag},
             timeout=15,
         )
         resp.raise_for_status()
@@ -177,7 +177,6 @@ class GammaClient:
         "nfl": "10187",
         "mlb": "3",
         "nhl": "10346",
-        "ufc": "10500",
         "mls": "10189",
         "epl": "10188",
         "soccer": "10188",  # alias

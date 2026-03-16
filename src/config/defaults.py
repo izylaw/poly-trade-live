@@ -90,7 +90,12 @@ DEFAULTS = {
     "safe_compounder_max_positions": 3,
 
     # Sports Daily strategy
-    "sports_daily_tags": ["sports", "nba", "nfl", "mlb", "nhl", "mma", "soccer"],
+    "sports_daily_tags": [
+        "sports", "nba", "nfl", "mlb", "nhl", "mma", "ufc", "soccer",
+        "tennis", "cricket", "golf", "f1", "rugby", "esports",
+        "premier-league", "la-liga", "bundesliga", "serie-a", "ligue-1",
+        "ncaa", "college-basketball", "baseball", "boxing",
+    ],
     "sports_daily_min_volume": 5000.0,
     "sports_daily_min_liquidity": 1000.0,
     "sports_daily_min_spread": 0.04,
