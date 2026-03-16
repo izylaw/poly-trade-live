@@ -249,6 +249,31 @@ class SportsDailyStrategy(Strategy):
         bid_1 = prices[1]["bid"] if prices.get(1) else 0.0
         ask_1 = prices[1]["ask"] if prices.get(1) else 1.0
 
+        # Fallback: if CLOB book is empty (spread > 0.90), use Gamma-provided
+        # bestBid/bestAsk which come from Polymarket's internal matching engine
+        using_gamma_prices = False
+        gamma_bid = float(market.get("bestBid", 0) or 0)
+        gamma_ask = float(market.get("bestAsk", 0) or 0)
+        if gamma_bid > 0 and gamma_ask > 0:
+            if ask_0 - bid_0 > 0.90 and gamma_ask - gamma_bid < 0.90:
+                using_gamma_prices = True
+                bid_0 = gamma_bid
+                ask_0 = gamma_ask
+                # Complement side: infer from outcomePrices if available
+                outcome_prices = self._parse_json_field(market.get("outcomePrices", []))
+                if len(outcome_prices) >= 2:
+                    try:
+                        p1 = float(outcome_prices[1])
+                        bid_1 = max(p1 - 0.01, 0.01)
+                        ask_1 = min(p1 + 0.01, 0.99)
+                    except (ValueError, TypeError):
+                        pass
+                books = {}  # Clear CLOB books — using Gamma prices
+                logger.info(
+                    f"sports_daily: using Gamma prices for '{question[:40]}' "
+                    f"bid={bid_0:.2f} ask={ask_0:.2f} (CLOB book empty)"
+                )
+
         mid_0 = (bid_0 + ask_0) / 2 if bid_0 > 0 and ask_0 < 1.0 else bid_0 or ask_0
         mid_1 = (bid_1 + ask_1) / 2 if bid_1 > 0 and ask_1 < 1.0 else bid_1 or ask_1
 
@@ -279,13 +304,15 @@ class SportsDailyStrategy(Strategy):
                     f"sports_daily: skip {outcome} '{question[:40]}' spread={spread:.2f} > max={self.max_spread}"
                 )
                 continue
-            bid_depth, ask_depth = self._book_depth(book)
-            if not (bid_depth >= self.min_book_depth and ask_depth >= self.min_book_depth):
-                logger.info(
-                    f"sports_daily: skip {outcome} '{question[:40]}' thin book "
-                    f"bid_depth=${bid_depth:.0f} ask_depth=${ask_depth:.0f} (min=${self.min_book_depth:.0f})"
-                )
-                continue
+            # Skip book depth check when using Gamma prices (no CLOB book available)
+            if not using_gamma_prices:
+                bid_depth, ask_depth = self._book_depth(book)
+                if not (bid_depth >= self.min_book_depth and ask_depth >= self.min_book_depth):
+                    logger.info(
+                        f"sports_daily: skip {outcome} '{question[:40]}' thin book "
+                        f"bid_depth=${bid_depth:.0f} ask_depth=${ask_depth:.0f} (min=${self.min_book_depth:.0f})"
+                    )
+                    continue
 
             pred = {
                 "strategy": self.name,
