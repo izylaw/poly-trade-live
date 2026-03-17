@@ -40,36 +40,46 @@ Each cycle runs every 30 seconds:
 
 ```
 1. SCAN
-   MarketScanner -> GammaClient.get_all_active_markets()
+   MarketScanner -> GammaClient.get_all_active_events()
+                 -> extract_markets_from_events()
                  -> normalize_market() (parse JSON fields)
                  -> MarketFilter.filter_markets()
                  Result: list of tradeable markets
+   (skipped when only self-discovering strategies are enabled)
 
-2. ANALYZE
-   For each enabled strategy (based on aggression level):
+2. ANALYZE (concurrent)
+   All enabled strategies run in parallel via ThreadPoolExecutor:
      Strategy.analyze(markets, clob_client) -> TradeSignal[]
-   Strategies query CLOB orderbooks for live prices
+   Self-discovering strategies (sports_daily, btc_updown, llm_crypto) find their own markets.
+   sports_daily batch-fetches orderbooks via get_books_batch() for efficiency.
+   llm_crypto runs every Nth cycle (default: 2) to limit LLM API load.
 
 3. RANK
    All signals sorted by expected_value (confidence * return)
 
-4. RISK GATE
+4. RESOLVE (every 5th cycle)
+   _resolve_predictions() — check unresolved predictions against Gamma
+   _resolve_positions() — close positions in resolved markets with PnL
+
+5. RISK GATE
    RiskManager.evaluate(signal, balance, positions, exposure)
    Must pass ALL checks:
      - Circuit breaker not active
      - Balance > hard floor
      - Confidence >= min threshold
-     - Open positions < max
+     - Global cap (20 short-term) → per-strategy cap → per-market limit
+     - Long-term bucket (5, resolution >7d, additive)
+     - Arbitrage exempt from position caps
      - Portfolio exposure < max
      - Daily loss limit not hit
      - Half-Kelly sizing > min trade
      - Post-trade balance > hard floor
 
-5. EXECUTE
+6. EXECUTE
    Executor routes to PaperExecutor or LiveExecutor
    Updates balance, positions, exposure after each fill
 
-6. ADAPT (every 5 minutes)
+7. ADAPT (every 5 minutes)
    GoalTracker calculates progress toward $1000
    AggressionTuner adjusts risk params:
      conservative / moderate / aggressive / ultra / emergency
@@ -82,7 +92,8 @@ Gamma API (REST)                    CLOB API (REST)
     |                                    |
     v                                    v
 GammaClient                        PolymarketClobClient
-(cached, 60s TTL)                  (get_price, post_order)
+(cached, 60s TTL,                  (get_price, get_books_batch,
+ parallel pagination)               extract_price, post_order)
     |                                    |
     v                                    v
 MarketScanner ----normalize----> Strategies analyze
@@ -122,7 +133,7 @@ MarketFilter                       TradeSignal
               |  1. CircuitBreaker   |--- paused? (losses, API errors, daily limit)
               |  2. Hard Floor       |--- balance > 20% of starting capital?
               |  3. Confidence       |--- signal >= min_confidence (tunable)?
-              |  4. Max Positions    |--- open_positions < 5?
+              |  4. Position Limits  |--- 3-tier: global(20) → per-strategy → per-market
               |  5. Exposure Limit   |--- portfolio < 60% of balance?
               |  6. Daily Loss       |--- today's loss < 15%?
               |  7. Kelly Sizing     |--- half_kelly > min_trade ($0.50)?
@@ -159,11 +170,11 @@ GoalTracker
 AggressionTuner
   reads GoalStatus, sets RiskManager params:
 
-  behind_pct <= 0%  -> conservative (5% max trade, 0.85 confidence, high-prob only)
-  behind_pct <= 5%  -> moderate     (10% max trade, 0.70 confidence, both strategies)
-  behind_pct <= 20% -> aggressive   (15% max trade, 0.60 confidence, both strategies)
-  behind_pct >  20% -> ultra        (15% max trade, 0.55 confidence, both strategies)
-  balance < start   -> emergency    (5% max trade, 0.90 confidence, high-prob only)
+  behind_pct <= 0%  -> conservative (5% max trade, 0.85 confidence, high-prob + arbitrage)
+  behind_pct <= 5%  -> moderate     (10% max trade, 0.70 confidence, all strategies)
+  behind_pct <= 20% -> aggressive   (15% max trade, 0.60 confidence, all strategies)
+  behind_pct >  20% -> ultra        (15% max trade, 0.55 confidence, all strategies)
+  balance < 60% start -> emergency  (5% max trade, 0.90 confidence, high-prob + arbitrage)
 ```
 
 ## Storage Schema
@@ -200,16 +211,82 @@ For each market with outcome priced $0.92-$0.98:
   order_type = GTC (patient fills)
 ```
 
-### Arbitrage
+### Arbitrage (3 modes)
 
 ```
-For each binary market:
-  if ask(YES) + ask(NO) < $1.00:
-    spread = 1.0 - (ask_YES + ask_NO)
-    if spread > 0.5%:
-      emit BUY YES + BUY NO signals
-      order_type = FOK (immediate fill)
-      confidence = 0.95
+1. Single-market YES+NO arb:
+   For each binary market:
+     spread = (1.0 - fee_rate) - (ask_YES + ask_NO)
+     if spread > 0.5%:
+       emit BUY YES + BUY NO signals (FOK, confidence=0.95)
+
+2. Multi-outcome event arb:
+   Group markets by _event_slug
+   For events with 3-6 markets (excluding above/below):
+     spread = (1.0 - fee_rate) - sum(all YES asks)
+     if spread > min_event_spread (2%):
+       emit BUY YES for each outcome (FOK, confidence=0.95)
+
+3. Cross-market monotonicity arb (above/below crypto events):
+   For events where slug/question contains "above":
+     Parse strike prices from questions (regex: $[\d,]+)
+     Sort by strike ascending
+     YES prices must decrease as strike increases
+     For each violation (lower strike YES cheaper than higher strike YES):
+       cost = low_strike_YES_ask + high_strike_NO_ask
+       spread = 1.0 - cost - 2*fee_rate
+       if spread > mono_min_spread (1%):
+         emit BUY low-strike YES + BUY high-strike NO (FOK, confidence=0.95)
+```
+
+### Sports Daily (self-discovering)
+
+```
+Discovery:
+  For each configured tag (sports, nba, nfl, etc.):
+    get_all_events_by_tag(tag) — parallel pagination via ThreadPoolExecutor
+  Filter: resolution < 24h, volume > min, liquidity > min
+
+Analysis (batch):
+  Collect all token IDs upfront
+  get_books_batch(all_tokens) — ~4 chunked requests instead of 332 sequential
+  For each market, extract prices via extract_price() from cached books
+
+Signal types:
+  1. Spread capture — maker bid in wide spreads (GTC, post-only)
+  2. Book imbalance — follow informed flow when bid side heavy
+  3. Favorite value — exploit favorite-longshot bias (0.82-0.95 range)
+```
+
+### LLM Crypto (self-discovering)
+
+```
+Uses a local LLM (Ollama/Qwen 27B) to analyze crypto markets on Polymarket.
+Runs every Nth cycle (default: 2) to limit LLM load.
+
+Discovery (4 sources):
+  1. Up/Down interval markets (1h, 4h) via slug: {asset}-updown-{interval}-{unix_ts}
+  2. Daily markets via slug: {coin}-above-on-{month}-{day},
+     {coin}-price-on-{month}-{day}, {coin}-up-or-down-on-{month}-{day}
+  3. Weekly hit price via slug: what-price-will-bitcoin-hit-{month}-{start}-{end}
+  4. Monthly hit price via slug: what-price-will-{coin}-hit-in-{month}-{year}
+  Assets: BTC, ETH, SOL (tickers for updown, full names for daily/weekly/monthly)
+
+Data gathering:
+  Pre-fetches Binance data once per asset (price, ATR, momentum, klines)
+  Caps markets at batch_size * 2 to limit CLOB calls
+  Uses 1m klines for updown, 15m for daily, 1h for weekly/monthly
+
+LLM analysis:
+  Sends batches of up to 5 markets to LLM with system + user prompt
+  LLM returns JSON array of assessments with action, probability, confidence
+  Actions: BUY_UP/BUY_DOWN (updown), BUY_YES/BUY_NO (yes/no markets)
+  Confidence scaling: low=0.85, medium=0.92, high=1.0
+
+Order execution:
+  Maker GTC orders with post_only=True (zero maker fees)
+  Smart bidding: undercuts best ask when below fair bid
+  Edge guard: bid must maintain min_edge (default: 0.05)
 ```
 
 ## Module Dependencies
@@ -223,14 +300,20 @@ utils/retry ───> clob_client, gamma_client
 storage/db ────> trade_log ──> paper_executor, live_executor,
                                position_tracker, order_manager
 
-market_data/gamma_client ──> market_scanner
-market_data/clob_client ───> strategies, live_executor
-market_data/market_filter ─> market_scanner
+market_data/gamma_client ──────> market_scanner, llm_crypto
+market_data/clob_client ───────> strategies, live_executor
+market_data/binance_client ────> btc_updown, safe_compounder, llm_crypto
+market_data/crypto_discovery ──> btc_updown, safe_compounder, llm_crypto
+market_data/market_filter ─────> market_scanner
+
+llm/client ────> llm_crypto (OpenAI-compatible API, Ollama)
+llm/prompts ───> llm_crypto
 
 risk/kelly ────────> risk_manager
 risk/circuit_breaker > risk_manager
 
-strategies/base ───> high_probability, arbitrage
+strategies/base ───> high_probability, arbitrage, sports_daily,
+                     btc_updown, safe_compounder, llm_crypto
 
 adaptive/goal_tracker ───> aggression_tuner
 

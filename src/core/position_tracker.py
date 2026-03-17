@@ -5,11 +5,12 @@ logger = logging.getLogger("poly-trade")
 
 
 class PositionTracker:
-    def __init__(self, trade_log: TradeLog):
+    def __init__(self, trade_log: TradeLog, paper_mode: bool = True):
         self.trade_log = trade_log
+        self.paper_mode = paper_mode
 
     def get_open_positions(self) -> list[dict]:
-        return self.trade_log.get_open_positions()
+        return self.trade_log.get_open_positions(paper_trade=self.paper_mode)
 
     def open_position(self, position: dict) -> int:
         return self.trade_log.save_position(position)

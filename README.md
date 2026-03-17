@@ -17,7 +17,15 @@ The bot runs a 30-second trading loop:
 
 **High Probability** — Buys outcomes priced $0.92–$0.98 that are near-certain to resolve YES. Small edge (2–8%) but very high win rate. Uses GTC limit orders for patient fills.
 
-**Arbitrage** — Detects when `ask(YES) + ask(NO) < $1.00` for guaranteed profit. Uses FOK orders for immediate execution. Rare but risk-free when found.
+**Arbitrage** — Three modes of risk-free arbitrage detection: (1) single-market YES+NO spread when `ask(YES) + ask(NO) < $1.00 - fees`, (2) multi-outcome event arb buying all YES tokens when `sum(asks) < $1.00 - fees` for events with 3+ mutually exclusive outcomes, and (3) cross-market monotonicity arb on "above $X" crypto events when strike-price ordering is violated. All use FOK orders for immediate execution.
+
+**Sports Daily** — Trades daily sports events using market microstructure signals: spread capture (maker bids in wide spreads), book imbalance (follow informed flow), and favorite value (exploit favorite-longshot bias). Self-discovering — finds markets via Gamma tag search with parallel pagination. Uses batch orderbook fetches for efficiency.
+
+**BTC Up/Down** — Trades crypto up/down interval markets (5m, 15m) using a price delta probability model. Captures reference price at window start, converts delta to directional probability via logistic function with momentum confirmation. Maker GTC orders with book-aware bidding.
+
+**Safe Compounder** — Conservative crypto interval strategy targeting high-confidence setups across BTC, ETH, SOL. Dual-side evaluation (per-market limit = 2) with cross-asset confirmation boost. Stricter risk limits (30% hard floor, 8% max trade, per-strategy cap = 3).
+
+**LLM Crypto** — Uses a local LLM (Ollama/Qwen 27B) to analyze all crypto market types on Polymarket: up/down (1h/4h intervals), above/below, price range, daily up/down, weekly hit price, and monthly hit price. Sends Binance price data + Polymarket orderbook data to the LLM in batches. Self-discovering via slug-based market lookup. Runs every other cycle to manage LLM latency.
 
 ## Risk Management
 
@@ -28,7 +36,9 @@ Every trade must pass all checks:
 | Hard Floor | 20% of starting capital ($2) | Balance never reaches $0 |
 | Max Single Trade | 10% of balance | No catastrophic single loss |
 | Max Portfolio Exposure | 60% of balance | Keep cash reserve |
-| Max Open Positions | 5 | Prevent over-diversification |
+| Per-Strategy Caps | 8 high_prob, 4 sports, 3 btc/safe, 2 llm (20 total) | Strategy-specific slot allocation |
+| Long-Term Bucket | 5 additive (resolution >7d) | Separate from short-term caps |
+| Arbitrage | Exempt from caps | Risk-free, unlimited |
 | Daily Loss Limit | 15% of start-of-day balance | Stop bleeding |
 | Min Trade Size | $0.50 | Skip meaningless trades |
 | Consecutive Loss Limit | 3 losses → 30min pause | Break losing streaks |
@@ -44,9 +54,9 @@ The bot tracks progress toward $1,000 and adjusts behavior:
 | Condition | Level | Max Trade | Min Confidence | Strategies |
 |-----------|-------|-----------|---------------|------------|
 | Ahead of schedule | Conservative | 5% | 0.85 | High-prob only |
-| On track | Moderate | 10% | 0.70 | Both |
-| Behind <20% | Aggressive | 15% | 0.60 | Both |
-| Behind >20% | Ultra | 15% | 0.55 | Both |
+| On track | Moderate | 10% | 0.70 | All enabled |
+| Behind <20% | Aggressive | 15% | 0.60 | All enabled |
+| Behind >20% | Ultra | 15% | 0.55 | All enabled |
 | Below starting capital | Emergency | 5% | 0.90 | High-prob only |
 
 If the initial target rate isn't sustainable, the bot recalculates the timeline automatically.
@@ -135,7 +145,14 @@ src/
 ├── strategies/
 │   ├── base.py              # Abstract strategy interface
 │   ├── high_probability.py  # Near-certain outcome buying
-│   └── arbitrage.py         # YES+NO spread detection
+│   ├── arbitrage.py         # YES+NO spread detection
+│   ├── sports_daily.py      # Sports microstructure (spread, imbalance, favorite)
+│   ├── btc_updown.py        # BTC up/down interval trading
+│   ├── safe_compounder.py   # Safe compounding strategy
+│   └── llm_crypto.py        # LLM-powered all-market crypto analysis
+├── llm/
+│   ├── client.py            # OpenAI-compatible LLM client (Ollama)
+│   └── prompts.py           # System + user prompt templates
 ├── risk/
 │   ├── risk_manager.py      # Gates every trade
 │   ├── kelly.py             # Half-Kelly position sizing
@@ -144,8 +161,10 @@ src/
 │   ├── goal_tracker.py      # $10→$1000 progress tracking
 │   └── aggression_tuner.py  # Adjusts risk params dynamically
 ├── market_data/
-│   ├── gamma_client.py      # Gamma API (markets, events)
+│   ├── gamma_client.py      # Gamma API (markets, events, slug discovery)
 │   ├── clob_client.py       # CLOB API wrapper (orders, book)
+│   ├── binance_client.py    # Binance API (price, klines, ATR, depth)
+│   ├── crypto_discovery.py  # Shared crypto market discovery + time windows
 │   ├── market_scanner.py    # Scans for opportunities
 │   └── market_filter.py     # Volume, liquidity, spread filters
 ├── execution/
@@ -161,10 +180,43 @@ src/
     └── retry.py             # Exponential backoff for API calls
 ```
 
+## Copy Trade Bot (Dry-Run)
+
+A dedicated copy-trading monitor is included at:
+
+```bash
+python scripts/copy_trade_bot.py --wallets-file scanner/results.json --max-wallets 100 --dry-run
+```
+
+What it does:
+- Monitors up to 100 wallets
+- Pulls recent `TRADE` activity from Polymarket Data API
+- Mirrors trades in dry-run mode (logs intents, no execution)
+- Applies risk controls:
+  - max mirror USD per trade
+  - daily loss stop
+  - per-wallet trade rate limit
+  - per-cycle mirror cap
+
+Output log:
+- `logs/copy_trade_events.jsonl`
+
+Example (single quick pass by stopping after first cycle manually):
+```bash
+python scripts/copy_trade_bot.py \
+  --wallets-file scanner/results.json \
+  --max-wallets 100 \
+  --interval-sec 20 \
+  --lookback-sec 120 \
+  --max-mirror-usd-per-trade 15 \
+  --daily-loss-limit-usd 50 \
+  --dry-run
+```
+
 ## Tests
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-Covers: Kelly sizing, risk manager gates, strategy signal generation, goal tracking, and aggression tuning.
+Covers: Kelly sizing, risk manager gates, strategy signal generation, goal tracking, aggression tuning, sports daily discovery/signals, market scanner pipeline, LLM crypto market discovery/actions, and deduplication.

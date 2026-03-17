@@ -4,11 +4,12 @@
 Adaptive Polymarket trading bot. Python, uses py-clob-client. Starts with $10 targeting $1000.
 
 ## Architecture
-- `src/core/engine.py` — Main trading loop (scan -> signal -> risk -> execute -> adapt)
-- `src/strategies/` — Strategy implementations (high_probability, arbitrage)
+- `src/core/engine.py` — Main trading loop (scan -> signal -> risk -> execute -> adapt). Strategies run concurrently via ThreadPoolExecutor. Resolution checks run every 5th cycle.
+- `src/strategies/` — Strategy implementations (high_probability, arbitrage, sports_daily, btc_updown, safe_compounder, llm_crypto)
+- `src/llm/` — LLM client (OpenAI-compatible, Ollama) and prompt templates for llm_crypto strategy
 - `src/risk/` — Risk management (kelly sizing, circuit breakers, hard floor)
 - `src/adaptive/` — Goal tracking and aggression tuning
-- `src/market_data/` — Gamma + CLOB API wrappers, market scanning
+- `src/market_data/` — Gamma + CLOB + Binance API wrappers, market scanning. Supports batch orderbook fetches, parallel Gamma pagination, and slug-based crypto market discovery.
 - `src/execution/` — Paper and live executors
 - `src/storage/` — SQLite persistence
 
@@ -17,6 +18,7 @@ Adaptive Polymarket trading bot. Python, uses py-clob-client. Starts with $10 ta
 - Every trade passes through risk_manager before execution.
 - Paper trading mode by default (PAPER_TRADING=true).
 - Half-Kelly position sizing.
+- Three-dimensional position limits: per-strategy caps (8 high_prob, 4 sports, 3 btc/safe, 2 llm = 20 total short-term), long-term bucket (5, resolution >7d, additive), arb exempt. Per-market: 2 for arb/safe_compounder/sports_daily, 1 for others. high_probability uses fill-time enforcement (pending orders don't count against cap; limit enforced when orders fill, remaining cancelled).
 
 ## Commands
 ```

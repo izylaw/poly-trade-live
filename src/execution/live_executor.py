@@ -1,18 +1,32 @@
 import logging
+import time
 from datetime import datetime, timezone
 from src.risk.risk_manager import ApprovedTrade
 from src.market_data.clob_client import PolymarketClobClient
 from src.storage.trade_log import TradeLog
 
+
+def _is_long_term(resolution_ts: float, threshold_days: int) -> bool:
+    return resolution_ts > 0 and resolution_ts - time.time() > threshold_days * 86400
+
 logger = logging.getLogger("poly-trade")
 
 
 class LiveExecutor:
-    def __init__(self, clob_client: PolymarketClobClient, trade_log: TradeLog):
+    def __init__(self, clob_client: PolymarketClobClient, trade_log: TradeLog, max_open_positions: int = 10,
+                 long_term_threshold_days: int = 7):
         self.clob = clob_client
         self.trade_log = trade_log
+        self.max_open_positions = max_open_positions
+        self.long_term_threshold_days = long_term_threshold_days
 
     def execute(self, trade: ApprovedTrade) -> dict:
+        if trade.signal.strategy != "arbitrage":
+            non_arb = [p for p in self.get_open_positions() if p.get("strategy") != "arbitrage"]
+            if len(non_arb) >= self.max_open_positions:
+                logger.info(f"Live: rejected order — {self.max_open_positions} positions already open")
+                return {"status": "rejected", "reason": "max_positions_reached"}
+
         try:
             result = self.clob.post_order(
                 token_id=trade.signal.token_id,
@@ -20,6 +34,7 @@ class LiveExecutor:
                 price=trade.signal.price,
                 size=trade.size,
                 order_type=trade.signal.order_type,
+                post_only=trade.signal.post_only,
             )
         except Exception as e:
             logger.error(f"Live order failed: {e}")
@@ -55,19 +70,27 @@ class LiveExecutor:
                 "token_id": trade.signal.token_id,
                 "outcome": trade.signal.outcome,
                 "market_question": trade.signal.market_question,
+                "strategy": trade.signal.strategy,
                 "entry_price": trade.signal.price,
                 "size": trade.size,
                 "cost": round(trade.cost, 4),
+                "paper_trade": False,
+                "resolution_ts": trade.signal.resolution_ts,
+                "is_long_term": 1 if _is_long_term(trade.signal.resolution_ts, self.long_term_threshold_days) else 0,
+                "slug": trade.signal.slug,
             }
             pos_id = self.trade_log.save_position(position)
         else:
             pos_id = None
 
         logger.info(f"LIVE ORDER: {order_id} status={status} | {trade.signal.outcome}@{trade.signal.price:.4f}")
-        return {"status": status, "trade_id": trade_id, "position_id": pos_id, "order_id": order_id}
+        result = {"status": status, "trade_id": trade_id, "position_id": pos_id, "order_id": order_id}
+        if status == "pending":
+            result["market_id"] = trade.signal.market_id
+        return result
 
     def get_balance(self) -> float:
         return self.clob.get_balance()
 
     def get_open_positions(self) -> list[dict]:
-        return self.trade_log.get_open_positions()
+        return self.trade_log.get_open_positions(paper_trade=False)
