@@ -87,6 +87,12 @@ class Settings(BaseSettings):
     max_signals_per_cycle: int = DEFAULTS["max_signals_per_cycle"]
     max_positions_per_asset: int = DEFAULTS["max_positions_per_asset"]
 
+    # Take-profit
+    take_profit_enabled: bool = DEFAULTS["take_profit_enabled"]
+    take_profit_pct: float = DEFAULTS["take_profit_pct"]
+    take_profit_strategies: list[str] = DEFAULTS["take_profit_strategies"]
+    take_profit_min_bid: float = DEFAULTS["take_profit_min_bid"]
+
     # Crypto Hourly strategy
     crypto_hourly_assets: list[str] = DEFAULTS["crypto_hourly_assets"]
     crypto_hourly_intervals: list[str] = DEFAULTS["crypto_hourly_intervals"]

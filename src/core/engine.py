@@ -112,6 +112,10 @@ class TradingEngine:
         if not self.circuit_breaker.check_catastrophic_drop(balance, prev_balance):
             return
 
+        # Take-profit check
+        if self.settings.take_profit_enabled:
+            self._check_take_profit()
+
         # 2. ANALYZE - collect signals from enabled strategies
         enabled = self.aggression_tuner.get_enabled_strategies()
         if self.settings.only_strategies:
@@ -482,6 +486,60 @@ class TradingEngine:
             "daily_return_pct": total_pnl / self.settings.starting_capital * 100 if self.settings.starting_capital > 0 else 0,
             "aggression_level": self.aggression_tuner.current_level,
         })
+
+    def _check_take_profit(self):
+        """Sell open positions that have gained above the take-profit threshold."""
+        tp_strategies = set(self.settings.take_profit_strategies)
+        positions = self.position_tracker.get_open_positions()
+        candidates = [p for p in positions if p.get("strategy") in tp_strategies]
+        if not candidates:
+            return
+
+        # Batch fetch prices
+        token_ids = list(set(p["token_id"] for p in candidates))
+        prices = {}
+        for tid in token_ids:
+            try:
+                prices[tid] = self.clob.get_price(tid)
+            except Exception:
+                pass
+
+        sold_count = 0
+        for pos in candidates:
+            price_data = prices.get(pos["token_id"])
+            if not price_data:
+                continue
+
+            current_bid = price_data.get("bid", 0)
+            if current_bid < self.settings.take_profit_min_bid:
+                continue
+
+            entry_price = pos.get("entry_price", 0)
+            if entry_price <= 0:
+                continue
+
+            gain_pct = (current_bid - entry_price) / entry_price
+            if gain_pct < self.settings.take_profit_pct:
+                continue
+
+            sell_price = round(current_bid, 2)
+            result = self.executor.sell_position(pos, sell_price)
+            if result.get("status") == "filled":
+                sold_count += 1
+                self.circuit_breaker.record_win()
+                pos_asset = self._extract_asset_from_position(pos)
+                if pos_asset:
+                    self._asset_cooldowns[pos_asset] = self._cycle_count + 1
+                logger.info(
+                    f"TAKE-PROFIT: pos#{pos['id']} {pos.get('outcome')} | "
+                    f"entry=${entry_price:.4f} bid=${current_bid:.4f} "
+                    f"gain={gain_pct:.1%} | PnL=${result.get('pnl', 0):+.2f}"
+                )
+
+        if sold_count > 0:
+            balance = self.executor.get_balance()
+            self.balance_mgr.update(balance)
+            logger.info(f"TAKE-PROFIT: sold {sold_count} position(s) | balance=${balance:.2f}")
 
     @staticmethod
     def _extract_asset_from_position(pos: dict) -> str:
