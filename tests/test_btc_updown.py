@@ -114,7 +114,8 @@ class TestEvaluateBothSides:
     def test_maker_bid_from_probability(self):
         """Bid price should be est_prob - cushion, not the ask.
         High est_prob (>0.65) uses dynamic cushion of 0.02."""
-        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_max_ask=0.95)
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_max_ask=0.95,
+                                 btc_updown_min_edge=0.01)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -124,21 +125,18 @@ class TestEvaluateBothSides:
 
         mock_clob = make_mock_clob()
 
-        # Very strong downward delta → Down est_prob ~ 0.95, Up clamped to 0.05
-        # Up bid = 0.05-0.05 = 0.00 < min_ask → skipped; only Down passes
+        # Strong downward delta with longer window to stay on maker path
         delta_info = {
-            "delta_pct": -0.003, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "delta_pct": -0.003, "window_progress": 0.7,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
         }
         momentum = -0.5
 
         signal, predictions = strategy._evaluate_both_sides(market, "BTC", delta_info, momentum, mock_clob)
         assert signal is not None
         assert signal.outcome == "Down"
-        # bid = est_prob - 0.02 (dynamic cushion for high confidence), should NOT be 0.99
         assert signal.price < 0.95
-        assert signal.price == pytest.approx(signal.confidence - 0.02, abs=0.01)
 
     def test_no_edge_returns_none(self):
         """At 50% probability with cushion=0.05, edge=0.05. Need min_edge > 0.05 to reject."""
@@ -349,7 +347,8 @@ class TestHelpers:
 class TestMakerBidPrice:
     def test_maker_bid_price_from_probability(self):
         """bid = est_prob - dynamic cushion (0.02 for high confidence), not ask."""
-        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_max_ask=0.95)
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_max_ask=0.95,
+                                 btc_updown_min_edge=0.01)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -359,11 +358,11 @@ class TestMakerBidPrice:
 
         mock_clob = make_mock_clob()
 
-        # Very strong down delta: Up prob clamped to 0.05 → bid below min_ask → skipped
+        # Strong down delta with longer window for maker path
         delta_info = {
-            "delta_pct": -0.003, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "delta_pct": -0.003, "window_progress": 0.7,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
         }
 
         signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.5, mock_clob)

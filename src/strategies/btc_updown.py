@@ -67,6 +67,10 @@ class BtcUpdownStrategy(Strategy):
                 except Exception as e:
                     logger.warning(f"btc_updown: prefetch failed for {asset}: {e}")
 
+        if asset_data:
+            assets_str = ", ".join(asset_data.keys())
+            logger.info(f"btc_updown: fetched data for {len(asset_data)} assets ({assets_str})")
+
         signals = []
         for asset in self.assets:
             if asset not in asset_data:
@@ -127,11 +131,11 @@ class BtcUpdownStrategy(Strategy):
         now = time.time()
         total_window = resolution_ts - start_ts if resolution_ts > start_ts else 300
         elapsed = now - start_ts
-        window_progress = _clamp(elapsed / total_window, 0.0, 1.5)
+        window_progress = _clamp(elapsed / total_window, 0.0, 1.0)
 
         delta_pct = (current_price - reference_price) / reference_price if reference_price > 0 else 0.0
 
-        logger.info(
+        logger.debug(
             f"btc_updown: delta={delta_pct:+.4%} | ref=${reference_price:,.2f} | "
             f"now=${current_price:,.2f} | progress={window_progress:.2f} | "
             f"vol={dynamic_vol:.4f} vs {self.btc_5m_vol:.4f} (baseline)"
@@ -211,19 +215,30 @@ class BtcUpdownStrategy(Strategy):
             use_gamma_prices = clob_spread > 0.90 and gamma_bid > 0.01
 
             if use_gamma_prices:
-                logger.info(
+                logger.debug(
                     f"btc_updown: CLOB empty for {asset} {outcome} "
                     f"[{best_bid:.2f}/{best_ask:.2f}], using Gamma "
                     f"[{gamma_bid:.2f}/{gamma_ask:.2f}]"
                 )
 
+            # Use Gamma bid or CLOB bid as market reference price
+            market_ref_bid = gamma_bid if use_gamma_prices else best_bid
+
             est_prob = self._estimate_outcome_probability(
                 outcome, delta_info["delta_pct"], delta_info["window_progress"],
-                momentum, dynamic_vol
+                momentum, dynamic_vol, market_bid=market_ref_bid,
             )
 
             # Minimum confidence filter — skip low-quality signals early
             if est_prob < self.min_confidence:
+                continue
+
+            # Market disagreement check: skip when model and market diverge >25 points
+            if market_ref_bid > 0.02 and abs(est_prob - market_ref_bid) > 0.25:
+                logger.debug(
+                    f"btc_updown: skip {asset} {outcome} — market disagreement "
+                    f"est_prob={est_prob:.2f} vs market={market_ref_bid:.2f}"
+                )
                 continue
 
             # Smart bid placement using book depth + Gamma fallback
@@ -301,7 +316,7 @@ class BtcUpdownStrategy(Strategy):
 
             # Validate bid is in tradeable range
             if bid_price < self.min_ask or bid_price > self.max_ask:
-                logger.info(
+                logger.debug(
                     f"btc_updown: skip {asset} {outcome} | bid=${bid_price:.2f} out of range "
                     f"[{self.min_ask}, {self.max_ask}] (est_prob={est_prob:.2f})"
                 )
@@ -312,7 +327,7 @@ class BtcUpdownStrategy(Strategy):
             edge = round(est_prob - bid_price, 4)
             ev = est_prob * (1.0 - bid_price) - (1.0 - est_prob) * bid_price
 
-            logger.info(
+            logger.debug(
                 f"btc_updown: MAKER BID {asset} {outcome} | bid=${bid_price:.2f} | "
                 f"est_prob={est_prob:.2f} | edge={edge:+.3f} | EV={ev:+.3f} | "
                 f"book=[{best_bid:.2f}/{best_ask:.2f}] | "
@@ -321,9 +336,9 @@ class BtcUpdownStrategy(Strategy):
 
             # When dynamic cushion is active (est_prob > 0.65 → cushion=0.02),
             # relax edge threshold to match the tighter cushion
-            outcome_min_edge = min(effective_min_edge, 0.02) if est_prob > 0.65 else effective_min_edge
+            outcome_min_edge = effective_min_edge
             if edge < outcome_min_edge or ev <= 0:
-                logger.info(
+                logger.debug(
                     f"btc_updown: skip {asset} {outcome} | edge={edge:+.3f} "
                     f"(below min {outcome_min_edge:.3f})"
                 )
@@ -433,17 +448,29 @@ class BtcUpdownStrategy(Strategy):
 
     def _estimate_outcome_probability(self, outcome: str, delta_pct: float,
                                        window_progress: float, momentum: float,
-                                       dynamic_vol: float | None = None) -> float:
+                                       dynamic_vol: float | None = None,
+                                       market_bid: float = 0.0) -> float:
         vol = dynamic_vol if dynamic_vol is not None else self.btc_5m_vol
         directional_delta = delta_pct if outcome.lower() == "up" else -delta_pct
         normalized = directional_delta / vol if vol > 0 else 0.0
-        time_factor = math.sqrt(max(window_progress, 0.0))
 
+        # Cap time factor at 0.85 — stop amplifying confidence near window end
+        time_factor = min(window_progress, 0.85)
+
+        # Dampen momentum weight (0.10 instead of full self.momentum_weight)
+        effective_momentum_weight = min(self.momentum_weight, 0.10)
         momentum_direction = 1.0 if outcome.lower() == "up" else -1.0
-        z = normalized * time_factor + momentum_direction * momentum * self.momentum_weight * time_factor
+        z = normalized * time_factor + momentum_direction * momentum * effective_momentum_weight * time_factor
 
-        prob = 1.0 / (1.0 + math.exp(-self.logistic_k * z))
-        return _clamp(prob, 0.05, 0.95)
+        model_prob = 1.0 / (1.0 + math.exp(-self.logistic_k * z))
+        model_prob = _clamp(model_prob, 0.05, 0.95)
+
+        # Anchor to market price: blend 70% model + 30% market
+        if market_bid > 0.02:
+            blended = 0.70 * model_prob + 0.30 * market_bid
+            return _clamp(blended, 0.05, 0.95)
+
+        return model_prob
 
     # --- Market discovery ---
 
