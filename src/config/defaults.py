@@ -8,16 +8,16 @@ DEFAULTS = {
     "log_level": "INFO",
 
     # Risk defaults
-    "hard_floor_pct": 0.20,
-    "max_single_trade_pct": 0.10,
-    "max_portfolio_exposure_pct": 0.60,
+    "hard_floor_pct": 0.10,
+    "max_single_trade_pct": 0.30,
+    "max_portfolio_exposure_pct": 0.70,
     "max_open_positions": 20,
-    "daily_loss_limit_pct": 0.15,
-    "min_trade_size": 0.50,
+    "daily_loss_limit_pct": 0.20,
+    "min_trade_size": 5.0,
     "consecutive_loss_pause": 3,
     "max_positions_per_market": 1,
     "high_prob_max_positions": 8,
-    "btc_updown_max_positions": 5,
+    "btc_updown_max_positions": 2,
     "llm_max_positions": 2,
     "max_long_term_positions": 5,
     "long_term_threshold_days": 7,
@@ -58,7 +58,7 @@ DEFAULTS = {
     # BTC Up/Down strategy (v2 — price delta model)
     "btc_updown_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
     "btc_updown_intervals": ["5m", "15m"],
-    "btc_updown_min_edge": 0.03,          # min (est_prob - ask) to trade
+    "btc_updown_min_edge": 0.02,          # min (est_prob - ask) to trade
     "btc_updown_5m_vol": 0.0025,          # mixed-crypto 5-min volatility baseline
     "btc_updown_logistic_k": 1.5,         # logistic steepness
     "btc_updown_momentum_weight": 0.3,    # momentum confirmation weight
@@ -66,6 +66,12 @@ DEFAULTS = {
     "btc_updown_max_ask": 0.85,           # max ask price to consider
     "btc_updown_taker_fee_rate": 0.0625,  # Polymarket dynamic taker fee rate
     "btc_updown_maker_edge_cushion": 0.05,  # bid = est_prob - cushion
+    "btc_updown_min_confidence": 0.60,     # min confidence to create signal
+    "btc_updown_fok_threshold_secs": 600,  # use FOK taker when < this time remaining
+
+    # Engine capital management
+    "max_signals_per_cycle": 0,            # 0 = unlimited, 1 = concentrate capital
+    "max_positions_per_asset": 1,          # max concurrent positions per asset
 
     # Crypto Hourly strategy (1h intervals, inherits btc_updown logic)
     "crypto_hourly_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],

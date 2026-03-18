@@ -12,8 +12,8 @@ class TradeLog:
             """INSERT INTO trades
                (timestamp, market_id, market_question, token_id, side, outcome,
                 price, size, cost, strategy, confidence, kelly_fraction,
-                order_type, status, fill_price, pnl, paper_trade, notes)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                order_type, status, fill_price, pnl, paper_trade, resolution_ts, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trade.get("timestamp", datetime.now(timezone.utc).isoformat()),
                 trade["market_id"],
@@ -32,11 +32,19 @@ class TradeLog:
                 trade.get("fill_price"),
                 trade.get("pnl"),
                 1 if trade.get("paper_trade", True) else 0,
+                trade.get("resolution_ts", 0),
                 trade.get("notes"),
             ),
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def get_stale_pending_trades(self) -> list[dict]:
+        """Return trades still marked 'pending' that have a resolution_ts."""
+        rows = self.conn.execute(
+            "SELECT id, resolution_ts FROM trades WHERE status='pending' AND resolution_ts > 0"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def update_trade_status(self, trade_id: int, status: str, pnl: float | None = None):
         if pnl is not None:
@@ -177,8 +185,8 @@ class TradeLog:
             """INSERT INTO predictions
                (timestamp, strategy, asset, interval, market_id, token_id,
                 outcome, est_prob, bid_price, delta_pct, window_progress,
-                momentum, dynamic_vol, resolution_ts, traded, trade_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                momentum, dynamic_vol, resolution_ts, traded, trade_id, paper_trade)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pred.get("timestamp", datetime.now(timezone.utc).isoformat()),
                 pred["strategy"],
@@ -196,6 +204,7 @@ class TradeLog:
                 pred.get("resolution_ts"),
                 1 if pred.get("traded") else 0,
                 pred.get("trade_id"),
+                0 if pred.get("paper_trade") is False else 1,
             ),
         )
         self.conn.commit()

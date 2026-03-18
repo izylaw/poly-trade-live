@@ -1,5 +1,4 @@
 import logging
-import random
 import time
 from datetime import datetime, timezone
 from src.risk.risk_manager import ApprovedTrade
@@ -11,6 +10,10 @@ def _is_long_term(resolution_ts: float, threshold_days: int) -> bool:
 
 logger = logging.getLogger("poly-trade")
 
+# Realistic taker slippage on Polymarket's thin crypto books
+TAKER_SLIPPAGE_BASE = 0.01   # 1% base slippage
+TAKER_SLIPPAGE_NOISE = 0.005  # ±0.5% random variance
+
 
 class PaperExecutor:
     def __init__(self, starting_balance: float, trade_log: TradeLog, max_open_positions: int = 10,
@@ -19,6 +22,7 @@ class PaperExecutor:
         self.trade_log = trade_log
         self.max_open_positions = max_open_positions
         self.long_term_threshold_days = long_term_threshold_days
+        self._reserved_cost: float = 0.0  # capital locked by pending orders
 
     def execute(self, trade: ApprovedTrade) -> dict:
         if trade.signal.post_only:
@@ -33,6 +37,9 @@ class PaperExecutor:
         if actual_cost > balance:
             logger.warning(f"Paper: insufficient balance ${balance:.2f} for cost ${actual_cost:.2f}")
             return {"status": "rejected", "reason": "insufficient_balance"}
+
+        # Reserve capital so subsequent orders can't double-spend
+        self._reserved_cost += actual_cost
 
         trade_record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -51,12 +58,13 @@ class PaperExecutor:
             "status": "pending",
             "fill_price": trade.signal.price,
             "paper_trade": True,
+            "resolution_ts": trade.signal.resolution_ts,
         }
         trade_id = self.trade_log.log_trade(trade_record)
 
         logger.info(
             f"PENDING: maker bid {trade.signal.outcome}@{trade.signal.price:.4f} "
-            f"x{trade.size:.2f} | balance=${balance:.2f}"
+            f"x{trade.size:.2f} | balance=${balance:.2f} (reserved=${self._reserved_cost:.2f})"
         )
         return {
             "status": "pending",
@@ -72,12 +80,16 @@ class PaperExecutor:
             "strategy": trade.signal.strategy,
             "confidence": trade.signal.confidence,
             "slug": trade.signal.slug,
+            "resolution_ts": trade.signal.resolution_ts,
+            "asset": trade.signal.asset,
         }
 
     def _execute_taker(self, trade: ApprovedTrade) -> dict:
-        """Taker order: instant fill with slippage."""
-        slippage = 0.001
-        fill_price = trade.signal.price * (1 + slippage)
+        """Taker order: instant fill with realistic slippage."""
+        import random
+        slippage = TAKER_SLIPPAGE_BASE + random.uniform(-TAKER_SLIPPAGE_NOISE, TAKER_SLIPPAGE_NOISE)
+        slippage = max(slippage, 0.002)  # at least 0.2%
+        fill_price = min(trade.signal.price * (1 + slippage), 0.99)
         actual_cost = trade.size * fill_price
 
         balance = self.get_balance()
@@ -102,6 +114,7 @@ class PaperExecutor:
             "status": "filled",
             "fill_price": fill_price,
             "paper_trade": True,
+            "resolution_ts": trade.signal.resolution_ts,
         }
         trade_id = self.trade_log.log_trade(trade_record)
 
@@ -123,13 +136,13 @@ class PaperExecutor:
         pos_id = self.trade_log.save_position(position)
 
         logger.info(
-            f"PAPER FILL: {trade.signal.outcome}@{fill_price:.4f} x{trade.size:.2f} "
-            f"cost=${actual_cost:.2f} | balance=${self.get_balance():.2f}"
+            f"PAPER FILL: {trade.signal.outcome}@{fill_price:.4f} (slippage={slippage:.3%}) "
+            f"x{trade.size:.2f} cost=${actual_cost:.2f} | balance=${self.get_balance():.2f}"
         )
         return {"status": "filled", "trade_id": trade_id, "position_id": pos_id, "fill_price": fill_price}
 
     def fill_order(self, order: dict) -> dict:
-        """Called by order_manager when probabilistic fill triggers."""
+        """Called by order_manager when market-price fill triggers."""
         open_positions = self.trade_log.get_open_positions(paper_trade=True)
         is_arb = order.get("strategy") == "arbitrage"
         if not is_arb:
@@ -161,14 +174,23 @@ class PaperExecutor:
 
         self.trade_log.update_trade_status(order["trade_id"], "filled")
 
+        # Release reserved capital (position cost is now tracked in DB)
+        self._reserved_cost = max(0.0, self._reserved_cost - actual_cost)
+
         logger.info(
             f"PAPER FILL: {order['outcome']}@{fill_price:.4f} x{order['size']:.2f} "
             f"cost=${actual_cost:.2f} | balance=${self.get_balance():.2f}"
         )
         return {"status": "filled", "position_id": pos_id}
 
+    def release_reserved(self, cost: float):
+        """Release reserved capital when an order is cancelled."""
+        self._reserved_cost = max(0.0, self._reserved_cost - cost)
+
     def get_balance(self) -> float:
-        return self.trade_log.compute_paper_balance(self.starting_balance)
+        """Available balance = DB balance - reserved capital for pending orders."""
+        db_balance = self.trade_log.compute_paper_balance(self.starting_balance)
+        return db_balance - self._reserved_cost
 
     def get_open_positions(self) -> list[dict]:
         return self.trade_log.get_open_positions(paper_trade=True)
