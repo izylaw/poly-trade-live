@@ -1070,23 +1070,24 @@ class TestSmartBid:
         mock_book = MagicMock()
         mock_book.asks = [MagicMock(price="0.60")]
 
+        # CLOB bid at 0.70 — close enough to model estimate to pass disagreement filter
         mock_clob = MagicMock()
-        mock_clob.get_price.return_value = {"ask": 0.60, "bid": 0.55, "mid": 0.575}
+        mock_clob.get_price.return_value = {"ask": 0.75, "bid": 0.70, "mid": 0.725}
         mock_clob.get_book.return_value = mock_book
 
-        # Strong down delta → Down est_prob ~ 0.88
-        # fair_bid = 0.88 - 0.05 = 0.83
-        # best_ask = 0.60 < 0.83 → undercut to 0.59
+        # Strong down delta → Down model_prob ~0.86, blended ~0.81
+        # fair_bid = 0.81 - 0.05 = 0.76
+        # best_ask = 0.60 < 0.76 → undercut to 0.59
         delta_info = {
             "delta_pct": -0.0015, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
         }
 
         signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.3, mock_clob)
         assert signal is not None
         assert signal.outcome == "Down"
-        # Should be undercut bid (0.59), not fair_bid (0.83)
+        # Should be undercut bid (0.59), not fair_bid
         assert signal.price == 0.59
 
 
@@ -1348,3 +1349,151 @@ class TestGammaPriceFallback:
         if signal is not None and signal.outcome == "Down":
             # Taker order: post_only should be False
             assert signal.post_only is False
+
+
+# --- Market anchoring tests (copilot review #6) ---
+
+class TestMarketAnchoring:
+    def test_blending_pulls_toward_market(self):
+        """When market_bid is provided, probability should be pulled toward it."""
+        strategy = make_strategy()
+        # Pure model with strong up delta
+        model_only = strategy._estimate_outcome_probability("Up", 0.003, 0.7, 0.0)
+        # Same but with low market bid — should pull estimate down
+        blended = strategy._estimate_outcome_probability("Up", 0.003, 0.7, 0.0, market_bid=0.40)
+        assert blended < model_only
+
+    def test_no_blending_when_market_bid_near_zero(self):
+        """Market bid <= 0.02 should not trigger blending."""
+        strategy = make_strategy()
+        prob_no_market = strategy._estimate_outcome_probability("Up", 0.001, 0.5, 0.0)
+        prob_zero_market = strategy._estimate_outcome_probability("Up", 0.001, 0.5, 0.0, market_bid=0.01)
+        assert prob_no_market == pytest.approx(prob_zero_market, abs=0.001)
+
+    def test_blending_weights(self):
+        """Blended probability should be 70% model + 30% market."""
+        strategy = make_strategy()
+        model_prob = strategy._compute_model_probability("Up", 0.002, 0.6, 0.0)
+        market_bid = 0.60
+        blended = strategy._estimate_outcome_probability("Up", 0.002, 0.6, 0.0, market_bid=market_bid)
+        expected = 0.70 * model_prob + 0.30 * market_bid
+        assert blended == pytest.approx(expected, abs=0.01)
+
+    def test_blending_with_high_market_bid(self):
+        """High market bid should pull model up toward market."""
+        strategy = make_strategy()
+        model_only = strategy._estimate_outcome_probability("Up", 0.0, 0.5, 0.0)
+        blended = strategy._estimate_outcome_probability("Up", 0.0, 0.5, 0.0, market_bid=0.80)
+        assert blended > model_only
+
+    def test_model_probability_unaffected_by_market(self):
+        """_compute_model_probability should not use market_bid."""
+        strategy = make_strategy()
+        prob1 = strategy._compute_model_probability("Up", 0.002, 0.6, 0.0)
+        prob2 = strategy._compute_model_probability("Up", 0.002, 0.6, 0.0)
+        assert prob1 == prob2
+
+
+# --- Market disagreement filter tests (copilot review #7) ---
+
+class TestMarketDisagreementFilter:
+    def test_disagreement_skips_signal(self):
+        """When model and market diverge >25 points, signal is skipped."""
+        strategy = make_strategy(btc_updown_min_confidence=0.0)
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "c1", "question": "BTC up?",
+            "_start_ts": time.time() - 150, "_resolution_ts": time.time() + 150,
+        }
+        # CLOB bid at 0.04 (market thinks ~4% for Up)
+        mock_clob = MagicMock()
+        mock_clob.get_price.return_value = {"ask": 0.06, "bid": 0.04, "mid": 0.05}
+        mock_clob.get_book.return_value = None
+
+        # Strong up delta → model thinks ~80%+ for Up, but market is at 4%
+        delta_info = {
+            "delta_pct": 0.003, "window_progress": 0.7,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
+        }
+
+        signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, 0.5, mock_clob)
+        # The Up signal should be skipped due to disagreement (model ~80% vs market 4%)
+        # Check that a skip prediction was logged
+        skip_preds = [p for p in preds if p.get("skip_reason") == "market_disagreement"]
+        assert len(skip_preds) > 0
+
+    def test_no_disagreement_when_market_agrees(self):
+        """When model and market are close, signal passes through."""
+        strategy = make_strategy(btc_updown_min_edge=0.01)
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "c2", "question": "BTC up?",
+            "_start_ts": time.time() - 150, "_resolution_ts": time.time() + 150,
+        }
+        # CLOB bid at 0.60 — close to where model will estimate
+        mock_clob = MagicMock()
+        mock_clob.get_price.return_value = {"ask": 0.65, "bid": 0.60, "mid": 0.625}
+        mock_clob.get_book.return_value = None
+
+        delta_info = {
+            "delta_pct": 0.001, "window_progress": 0.5,
+            "time_remaining": 700, "dynamic_vol": 0.0025,
+            "resolution_ts": time.time() + 700,
+        }
+
+        signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, 0.2, mock_clob)
+        skip_preds = [p for p in preds if p.get("skip_reason") == "market_disagreement"]
+        assert len(skip_preds) == 0
+
+    def test_disagreement_check_ignores_thin_market(self):
+        """When market_ref_bid <= 0.02, disagreement check is skipped."""
+        strategy = make_strategy(btc_updown_min_edge=0.01, btc_updown_min_confidence=0.0)
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "c3", "question": "BTC up?",
+            "_start_ts": time.time() - 150, "_resolution_ts": time.time() + 150,
+        }
+        # CLOB bid at 0.01 — too thin for disagreement check
+        mock_clob = MagicMock()
+        mock_clob.get_price.return_value = {"ask": 0.99, "bid": 0.01, "mid": 0.50}
+        mock_clob.get_book.return_value = None
+
+        delta_info = {
+            "delta_pct": 0.003, "window_progress": 0.7,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
+        }
+
+        signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, 0.5, mock_clob)
+        # Should NOT skip for disagreement since market_ref_bid is 0.01
+        skip_preds = [p for p in preds if p.get("skip_reason") == "market_disagreement"]
+        assert len(skip_preds) == 0
+
+    def test_low_confidence_skip_logged(self):
+        """When confidence is below min, skip is logged with reason."""
+        strategy = make_strategy(btc_updown_min_confidence=0.70)
+        market = {
+            "outcomes": ["Up", "Down"],
+            "clobTokenIds": ["token_up", "token_down"],
+            "conditionId": "c4", "question": "BTC up?",
+            "_start_ts": time.time() - 150, "_resolution_ts": time.time() + 150,
+        }
+        # Market bid at 0.40 — model will blend to ~0.45-0.55 range
+        mock_clob = MagicMock()
+        mock_clob.get_price.return_value = {"ask": 0.45, "bid": 0.40, "mid": 0.425}
+        mock_clob.get_book.return_value = None
+
+        # Neutral delta → prob around 0.50, below min_confidence of 0.70
+        delta_info = {
+            "delta_pct": 0.0, "window_progress": 0.3,
+            "time_remaining": 700, "dynamic_vol": 0.0025,
+            "resolution_ts": time.time() + 700,
+        }
+
+        signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, 0.0, mock_clob)
+        low_conf_preds = [p for p in preds if p.get("skip_reason") == "low_confidence"]
+        assert len(low_conf_preds) > 0
