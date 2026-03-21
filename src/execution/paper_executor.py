@@ -183,6 +183,46 @@ class PaperExecutor:
         )
         return {"status": "filled", "position_id": pos_id}
 
+    def sell_position(self, position: dict, sell_price: float) -> dict:
+        """Simulate selling a position at the given price with slippage."""
+        import random
+        slippage = TAKER_SLIPPAGE_BASE + random.uniform(-TAKER_SLIPPAGE_NOISE, TAKER_SLIPPAGE_NOISE)
+        slippage = max(slippage, 0.002)
+        actual_sell_price = max(sell_price * (1 - slippage), 0.01)
+
+        pnl = (actual_sell_price - position["entry_price"]) * position["size"]
+        self.trade_log.close_position(position["id"], pnl)
+
+        trade_record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_id": position["market_id"],
+            "market_question": position.get("market_question", ""),
+            "token_id": position["token_id"],
+            "side": "SELL",
+            "outcome": position["outcome"],
+            "price": sell_price,
+            "size": position["size"],
+            "cost": 0,
+            "strategy": position.get("strategy", "unknown"),
+            "confidence": 0,
+            "kelly_fraction": 0,
+            "order_type": "FOK",
+            "status": "filled",
+            "fill_price": actual_sell_price,
+            "pnl": pnl,
+            "paper_trade": True,
+            "resolution_ts": position.get("resolution_ts", 0),
+            "notes": "take_profit_sell",
+        }
+        self.trade_log.log_trade(trade_record)
+
+        logger.info(
+            f"PAPER TAKE-PROFIT SELL: pos#{position['id']} {position['outcome']} "
+            f"entry=${position['entry_price']:.4f} exit=${actual_sell_price:.4f} "
+            f"pnl=${pnl:+.2f} | balance=${self.get_balance():.2f}"
+        )
+        return {"status": "filled", "pnl": pnl, "position_id": position["id"]}
+
     def release_reserved(self, cost: float):
         """Release reserved capital when an order is cancelled."""
         self._reserved_cost = max(0.0, self._reserved_cost - cost)

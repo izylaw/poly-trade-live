@@ -73,6 +73,12 @@ DEFAULTS = {
     "max_signals_per_cycle": 0,            # 0 = unlimited, 1 = concentrate capital
     "max_positions_per_asset": 1,          # max concurrent positions per asset
 
+    # Take-profit
+    "take_profit_enabled": True,
+    "take_profit_pct": 0.30,              # 30% gain triggers sell
+    "take_profit_strategies": ["btc_updown"],
+    "take_profit_min_bid": 0.02,          # skip if bid too thin (no real buyer)
+
     # Crypto Hourly strategy (1h intervals, inherits btc_updown logic)
     "crypto_hourly_assets": ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"],
     "crypto_hourly_intervals": ["1h"],
