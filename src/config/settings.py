@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     btc_updown_max_ask: float = DEFAULTS["btc_updown_max_ask"]
     btc_updown_taker_fee_rate: float = DEFAULTS["btc_updown_taker_fee_rate"]
     btc_updown_maker_edge_cushion: float = DEFAULTS["btc_updown_maker_edge_cushion"]
+    btc_updown_min_confidence: float = DEFAULTS["btc_updown_min_confidence"]
+    btc_updown_fok_threshold_secs: int = DEFAULTS["btc_updown_fok_threshold_secs"]
+
+    # Engine capital management
+    max_signals_per_cycle: int = DEFAULTS["max_signals_per_cycle"]
+    max_positions_per_asset: int = DEFAULTS["max_positions_per_asset"]
 
     # Crypto Hourly strategy
     crypto_hourly_assets: list[str] = DEFAULTS["crypto_hourly_assets"]

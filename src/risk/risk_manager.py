@@ -25,6 +25,7 @@ class TradeSignal:
     arb_group: str = ""
     resolution_ts: float = 0.0
     slug: str = ""
+    asset: str = ""
 
 
 @dataclass
@@ -37,7 +38,7 @@ class ApprovedTrade:
 
 class RiskManager:
     STRATEGY_MIN_CONFIDENCE = {
-        "btc_updown": 0.55,
+        "btc_updown": 0.60,
         "safe_compounder": 0.78,
         "sports_daily": 0.55,
         "high_probability": 0.06,

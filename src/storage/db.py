@@ -60,4 +60,11 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    # Migration: add resolution_ts column to trades if missing (existing DBs)
+    try:
+        conn.execute("ALTER TABLE trades ADD COLUMN resolution_ts REAL NOT NULL DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     return conn

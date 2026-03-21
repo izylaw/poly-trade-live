@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS trades (
     fill_price REAL,
     pnl REAL,
     paper_trade INTEGER NOT NULL DEFAULT 1,
+    resolution_ts REAL NOT NULL DEFAULT 0,
     notes TEXT
 );
 
@@ -74,6 +75,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     resolution_ts REAL,
     traded INTEGER NOT NULL DEFAULT 0,
     trade_id INTEGER,
+    paper_trade INTEGER NOT NULL DEFAULT 1,
     resolved INTEGER NOT NULL DEFAULT 0,
     actual_correct INTEGER,
     pnl REAL

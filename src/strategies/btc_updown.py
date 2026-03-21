@@ -30,6 +30,8 @@ class BtcUpdownStrategy(Strategy):
         self.max_ask = settings.btc_updown_max_ask
         self.taker_fee_rate = settings.btc_updown_taker_fee_rate
         self.maker_edge_cushion = settings.btc_updown_maker_edge_cushion
+        self.min_confidence = settings.btc_updown_min_confidence
+        self.fok_threshold_secs = settings.btc_updown_fok_threshold_secs
         self._pending_predictions: list[dict] = []
 
     def _prefetch_asset_data(self, asset: str) -> dict:
@@ -220,6 +222,10 @@ class BtcUpdownStrategy(Strategy):
                 momentum, dynamic_vol
             )
 
+            # Minimum confidence filter — skip low-quality signals early
+            if est_prob < self.min_confidence:
+                continue
+
             # Smart bid placement using book depth + Gamma fallback
             bid_price = self._get_smart_bid(
                 est_prob, book,
@@ -245,20 +251,29 @@ class BtcUpdownStrategy(Strategy):
                 "traded": False,
             }
 
-            # Late-window Gamma taker: when window nearly done with strong signal,
-            # take the Gamma ask directly if it's below our estimate
-            if (use_gamma_prices and window_progress > 0.70
-                    and est_prob > 0.65 and gamma_ask < est_prob - 0.01):
+            time_remaining = delta_info.get("time_remaining", float("inf"))
+            use_fok = time_remaining < self.fok_threshold_secs
+
+            # FOK taker for short-lived markets OR late-window strong signal
+            should_take = (
+                (use_fok and use_gamma_prices and gamma_ask < est_prob - 0.01)
+                or (use_gamma_prices and window_progress > 0.70
+                    and est_prob > 0.65 and gamma_ask < est_prob - 0.01)
+            )
+            if should_take:
                 taker_price = gamma_ask
                 taker_ev = est_prob * (1.0 - taker_price) * (1.0 - self.taker_fee_rate) \
                     - (1.0 - est_prob) * taker_price
                 if taker_ev > 0 and self.min_ask <= taker_price <= self.max_ask:
                     taker_edge = est_prob - taker_price
+                    order_type = "FOK" if use_fok else "GTC"
                     logger.info(
-                        f"btc_updown: TAKER {asset} {outcome} | ask=${taker_price:.2f} | "
-                        f"est_prob={est_prob:.2f} | edge={taker_edge:+.3f} | "
-                        f"EV={taker_ev:+.3f} (after {self.taker_fee_rate:.2%} fee) | "
-                        f"progress={window_progress:.2f}"
+                        f"btc_updown: TAKER({order_type}) {asset} {outcome} | "
+                        f"ask=${taker_price:.2f} | est_prob={est_prob:.2f} | "
+                        f"edge={taker_edge:+.3f} | EV={taker_ev:+.3f} "
+                        f"(after {self.taker_fee_rate:.2%} fee) | "
+                        f"progress={window_progress:.2f} | "
+                        f"time_remaining={time_remaining:.0f}s"
                     )
                     pred["traded"] = True
                     pred["bid_price"] = taker_price
@@ -275,11 +290,12 @@ class BtcUpdownStrategy(Strategy):
                             confidence=est_prob,
                             strategy=self.name,
                             expected_value=taker_ev,
-                            order_type="GTC",
+                            order_type=order_type,
                             post_only=False,
                             cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
                             resolution_ts=resolution_ts,
                             slug=market.get("_event_slug", ""),
+                            asset=asset,
                         )
                     continue
 
@@ -334,6 +350,7 @@ class BtcUpdownStrategy(Strategy):
                     cancel_after_ts=resolution_ts - 30 if resolution_ts else 0,
                     resolution_ts=resolution_ts,
                     slug=market.get("_event_slug", ""),
+                    asset=asset,
                 )
 
         return best_signal, predictions

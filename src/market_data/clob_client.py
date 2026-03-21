@@ -3,8 +3,27 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams, BookParams, OrderArgs, OrderType
+from web3 import Web3
+from eth_account import Account
 from src.config.settings import Settings
 from src.utils.retry import retry
+
+CTF_ABI = [
+    {
+        "inputs": [
+            {"name": "collateralToken", "type": "address"},
+            {"name": "parentCollectionId", "type": "bytes32"},
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "indexSets", "type": "uint256[]"},
+        ],
+        "name": "redeemPositions",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+]
+CTF_CONTRACT = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 
 # py-clob-client uses a module-level httpx.Client with no timeout, which can
 # hang indefinitely on CLOB API slowness.  Patch it with a 30s timeout.
@@ -260,6 +279,40 @@ class PolymarketClobClient:
                 break
         logger.info(f"CLOB tradeability index: {len(condition_ids)} tradeable markets")
         return condition_ids
+
+    def redeem_positions(self, condition_id: str) -> str | None:
+        """Redeem resolved CTF positions on-chain. Returns tx hash or None on failure."""
+        try:
+            w3 = Web3(Web3.HTTPProvider(self.settings.polygon_rpc_url))
+            acct = Account.from_key(self.settings.poly_private_key)
+            ctf = w3.eth.contract(
+                address=Web3.to_checksum_address(CTF_CONTRACT), abi=CTF_ABI
+            )
+            cid_bytes = bytes.fromhex(condition_id[2:] if condition_id.startswith("0x") else condition_id)
+            tx = ctf.functions.redeemPositions(
+                Web3.to_checksum_address(USDC_POLYGON),
+                b"\x00" * 32,  # parent collection (root)
+                cid_bytes,
+                [1, 2],  # both outcome index sets for binary markets
+            ).build_transaction({
+                "from": acct.address,
+                "nonce": w3.eth.get_transaction_count(acct.address),
+                "gas": 150000,
+                "gasPrice": int(w3.eth.gas_price * 1.2),
+                "chainId": CHAIN_ID,
+            })
+            signed = acct.sign_transaction(tx)
+            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+            if receipt.status == 1:
+                logger.info(f"REDEEMED condition={condition_id[:16]}... tx={tx_hash.hex()}")
+                return tx_hash.hex()
+            else:
+                logger.error(f"Redeem tx failed: {tx_hash.hex()}")
+                return None
+        except Exception as e:
+            logger.error(f"Redeem failed for {condition_id[:16]}...: {e}")
+            return None
 
     def derive_api_creds(self) -> ApiCreds:
         client = ClobClient(

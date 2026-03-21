@@ -60,6 +60,7 @@ class LiveExecutor:
             "status": status,
             "fill_price": trade.signal.price,
             "paper_trade": False,
+            "resolution_ts": trade.signal.resolution_ts,
             "notes": f"order_id={order_id}",
         }
         trade_id = self.trade_log.log_trade(trade_record)
@@ -87,6 +88,16 @@ class LiveExecutor:
         result = {"status": status, "trade_id": trade_id, "position_id": pos_id, "order_id": order_id}
         if status == "pending":
             result["market_id"] = trade.signal.market_id
+            result["token_id"] = trade.signal.token_id
+            result["outcome"] = trade.signal.outcome
+            result["market_question"] = trade.signal.market_question
+            result["strategy"] = trade.signal.strategy
+            result["entry_price"] = trade.signal.price
+            result["size"] = trade.size
+            result["cost"] = round(trade.cost, 4)
+            result["resolution_ts"] = trade.signal.resolution_ts
+            result["slug"] = trade.signal.slug
+            result["asset"] = trade.signal.asset
         return result
 
     def get_balance(self) -> float:

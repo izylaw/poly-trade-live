@@ -1,11 +1,8 @@
 import logging
-import random
 import time
 from src.storage.trade_log import TradeLog
 
 logger = logging.getLogger("poly-trade")
-
-PAPER_BASE_FILL_RATE = 0.35  # 35% chance per cycle (was 15% — too low for short windows)
 
 
 class OrderManager:
@@ -26,6 +23,23 @@ class OrderManager:
     def get_pending_orders(self) -> list[dict]:
         return list(self._pending_orders)
 
+    def cleanup_expired_orders(self):
+        """Mark orders as expired if their market has resolved."""
+        now = time.time()
+        to_remove = []
+        for order in self._pending_orders:
+            resolution_ts = order.get("resolution_ts", 0)
+            if resolution_ts > 0 and now > resolution_ts:
+                tid = order.get("trade_id")
+                if tid:
+                    self.trade_log.update_trade_status(tid, "expired")
+                to_remove.append(order)
+                logger.info(f"Expired stale order trade_id={tid} (market resolved)")
+        for order in to_remove:
+            self._pending_orders.remove(order)
+        if to_remove:
+            logger.info(f"Cleaned up {len(to_remove)} expired pending orders")
+
     def check_pending_orders(self, clob_client, executor, paper_mode: bool = False) -> list[dict]:
         """Poll pending orders, handle fills and timeouts."""
         filled = []
@@ -39,7 +53,7 @@ class OrderManager:
 
             # Auto-cancel if past deadline
             if cancel_after and now >= cancel_after:
-                self._cancel_order(order, clob_client, paper_mode)
+                self._cancel_order(order, clob_client, paper_mode, executor=executor)
                 to_remove.append(order)
                 continue
 
@@ -56,18 +70,35 @@ class OrderManager:
                         )
                     if strategy_fill_counts[strategy] >= self.strategy_limits[strategy]:
                         self._cancel_order(order, clob_client, paper_mode)
+                        executor.paper.release_reserved(order.get("cost", 0))
                         to_remove.append(order)
                         continue
 
-                # Probabilistic fill: base rate boosted by confidence
-                # Higher confidence = bid closer to fair value = more likely to fill
-                confidence = order.get("confidence", 0.6)
-                confidence_boost = min(confidence, 0.9)  # cap at 0.9
-                fill_prob = PAPER_BASE_FILL_RATE * (1 + confidence_boost)
-                if random.random() < fill_prob:
+                # Market-price fill: check if CLOB ask dropped to our bid
+                # This simulates adverse selection — you fill when price moves against you
+                token_id = order.get("token_id")
+                bid_price = order.get("fill_price", 0)
+                should_fill = False
+                if token_id:
+                    try:
+                        price_data = clob_client.get_price(token_id)
+                        if price_data:
+                            current_ask = price_data.get("ask", 1.0)
+                            # Fill when the ask has dropped to or below our bid
+                            if current_ask <= bid_price:
+                                should_fill = True
+                                logger.info(
+                                    f"Paper fill triggered: ask={current_ask:.4f} <= bid={bid_price:.4f} "
+                                    f"for {order.get('outcome', '?')}"
+                                )
+                    except Exception as e:
+                        logger.debug(f"Paper: failed to check price for {token_id[:16]}: {e}")
+
+                if should_fill:
                     result = executor.paper.fill_order(order)
                     if result.get("status") == "rejected":
                         self._cancel_order(order, clob_client, paper_mode)
+                        executor.paper.release_reserved(order.get("cost", 0))
                         to_remove.append(order)
                         continue
                     self.trade_log.update_trade_status(order["trade_id"], "filled")
@@ -83,6 +114,26 @@ class OrderManager:
                     status = clob_client.get_order(order_id)
                     if status and _is_filled(status):
                         self.trade_log.update_trade_status(order["trade_id"], "filled")
+                        # Create position record for filled live order
+                        resolution_ts = order.get("resolution_ts", 0)
+                        long_term_days = 7
+                        is_lt = 1 if resolution_ts > 0 and resolution_ts - time.time() > long_term_days * 86400 else 0
+                        position = {
+                            "market_id": order.get("market_id", ""),
+                            "token_id": order.get("token_id", ""),
+                            "outcome": order.get("outcome", ""),
+                            "market_question": order.get("market_question", ""),
+                            "strategy": order.get("strategy", ""),
+                            "entry_price": order.get("entry_price", 0),
+                            "size": order.get("size", 0),
+                            "cost": order.get("cost", 0),
+                            "paper_trade": False,
+                            "resolution_ts": resolution_ts,
+                            "is_long_term": is_lt,
+                            "slug": order.get("slug", ""),
+                        }
+                        self.trade_log.save_position(position)
+                        logger.info(f"LIVE FILL: {order.get('outcome')}@{order.get('entry_price', 0):.4f} x{order.get('size', 0)} cost=${order.get('cost', 0):.2f}")
                         to_remove.append(order)
                         filled.append(order)
 
@@ -115,7 +166,7 @@ class OrderManager:
                     to_cancel = [o for o in self._pending_orders
                                  if o.get("strategy") == strategy]
                     for order in to_cancel:
-                        self._cancel_order(order, clob_client, paper_mode)
+                        self._cancel_order(order, clob_client, paper_mode, executor=executor)
                         self._pending_orders.remove(order)
                     if to_cancel:
                         logger.info(
@@ -125,12 +176,15 @@ class OrderManager:
 
         return filled
 
-    def _cancel_order(self, order: dict, clob_client, paper_mode: bool = False):
+    def _cancel_order(self, order: dict, clob_client, paper_mode: bool = False,
+                      executor=None):
         tid = order.get("trade_id")
         if tid:
             self.trade_log.update_trade_status(tid, "cancelled")
 
-        if not paper_mode:
+        if paper_mode and executor and hasattr(executor, 'paper'):
+            executor.paper.release_reserved(order.get("cost", 0))
+        elif not paper_mode:
             order_id = order.get("order_id")
             if order_id:
                 try:

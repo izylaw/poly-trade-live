@@ -56,6 +56,7 @@ class TradingEngine:
         self._last_adapt_time = 0.0
         self._cycle_count = 0
         self._gamma = GammaClient()
+        self._asset_cooldowns: dict[str, int] = {}  # asset → cycle when cooldown expires
 
     def start(self):
         self._running = True
@@ -63,6 +64,9 @@ class TradingEngine:
         self.balance_mgr.update(balance)
         self.circuit_breaker.set_start_of_day_balance(balance)
         self.goal_tracker.record_balance(balance)
+
+        # Startup cleanup: expire stale pending orders from DB
+        self._cleanup_stale_db_orders()
 
         logger.info(f"Engine started | mode={self.executor.mode} | balance=${balance:.2f}")
 
@@ -88,6 +92,9 @@ class TradingEngine:
 
     def _cycle(self):
         self._cycle_count += 1
+
+        # Clean up stale pending orders whose markets have resolved
+        self.order_manager.cleanup_expired_orders()
 
         # Check circuit breaker
         if self.circuit_breaker.is_paused:
@@ -157,6 +164,7 @@ class TradingEngine:
             if hasattr(strategy, '_pending_predictions') and strategy._pending_predictions:
                 for pred in strategy._pending_predictions:
                     try:
+                        pred["paper_trade"] = self.settings.paper_trading
                         self.trade_log.log_prediction(pred)
                     except Exception as e:
                         logger.debug(f"Failed to log prediction: {e}")
@@ -192,18 +200,51 @@ class TradingEngine:
 
         positions_for_risk = open_positions + [
             {"market_id": o.get("market_id", ""), "strategy": o.get("strategy", "unknown"),
-             "is_long_term": 0, "cost": 0}
+             "is_long_term": 0, "cost": o.get("cost", 0)}
             for o in pending_orders
             if o.get("strategy") != "high_probability"
         ]
 
+        # Build per-asset position count for diversification
+        asset_pos_count: Counter = Counter()
+        for p in open_positions:
+            a = p.get("asset", "")
+            if a:
+                asset_pos_count[a] += 1
+        for o in pending_orders:
+            a = o.get("asset", "")
+            if a:
+                asset_pos_count[a] += 1
+
+        max_signals = self.settings.max_signals_per_cycle
+
         executed_count = 0
         for signal in all_signals:
+            # Max signals per cycle limit (0 = unlimited)
+            if max_signals > 0 and executed_count >= max_signals:
+                logger.info(f"SKIP remaining signals — max_signals_per_cycle={max_signals} reached")
+                break
+
             # Duplicate market check (strategy-aware)
             max_for_market = RiskManager.STRATEGY_MAX_PER_MARKET.get(signal.strategy, self.settings.max_positions_per_market)
             if market_pos_count.get(signal.market_id, 0) >= max_for_market:
                 logger.debug(f"SKIP duplicate market: {signal.market_question[:50]}")
                 continue
+
+            # Per-asset diversification: max N positions per asset
+            signal_asset = getattr(signal, 'asset', '')
+            if signal_asset:
+                max_per_asset = self.settings.max_positions_per_asset
+                if asset_pos_count.get(signal_asset, 0) >= max_per_asset:
+                    logger.info(f"SKIP {signal_asset} — already {max_per_asset} position(s) on this asset")
+                    continue
+
+            # Per-asset cooldown after loss/win
+            if signal_asset and signal_asset in self._asset_cooldowns:
+                if self._cycle_count < self._asset_cooldowns[signal_asset]:
+                    remaining = self._asset_cooldowns[signal_asset] - self._cycle_count
+                    logger.info(f"SKIP {signal_asset} — cooldown for {remaining} more cycle(s)")
+                    continue
 
             approved = self.risk_manager.evaluate(signal, balance, positions_for_risk, exposure)
             if approved is None:
@@ -213,6 +254,8 @@ class TradingEngine:
             if result.get("status") in ("filled", "pending"):
                 executed_count += 1
                 market_pos_count[signal.market_id] += 1
+                if signal_asset:
+                    asset_pos_count[signal_asset] += 1
                 cost = getattr(approved, 'cost', 0)
                 positions_for_risk.append(
                     {"market_id": signal.market_id, "strategy": signal.strategy,
@@ -310,12 +353,23 @@ class TradingEngine:
             else:
                 self.circuit_breaker.record_loss()
 
+            # Per-asset cooldown: 2 cycles after win, 5 after loss
+            pos_asset = self._extract_asset_from_position(pos)
+            if pos_asset:
+                cooldown_cycles = 2 if won else 5
+                self._asset_cooldowns[pos_asset] = self._cycle_count + cooldown_cycles
+                logger.info(f"Asset cooldown: {pos_asset} for {cooldown_cycles} cycles ({'win' if won else 'loss'})")
+
             resolved_count += 1
             logger.info(
                 f"POSITION RESOLVED: #{pos['id']} {pos_outcome} | "
                 f"{'WIN' if won else 'LOSS'} | PnL=${pnl:+.2f} | "
                 f"entry=${entry_price:.3f} size={size:.2f}"
             )
+
+            # Auto-redeem winning positions on-chain (skip losses to save gas)
+            if not self.settings.paper_trading and won:
+                self.clob.redeem_positions(market_id)
 
         if resolved_count > 0:
             balance = self.executor.get_balance()
@@ -428,3 +482,33 @@ class TradingEngine:
             "daily_return_pct": total_pnl / self.settings.starting_capital * 100 if self.settings.starting_capital > 0 else 0,
             "aggression_level": self.aggression_tuner.current_level,
         })
+
+    @staticmethod
+    def _extract_asset_from_position(pos: dict) -> str:
+        """Extract asset name (BTC, ETH, etc.) from position data."""
+        asset = pos.get("asset", "")
+        if asset:
+            return asset
+        question = pos.get("market_question", "")
+        for token in ("BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"):
+            if token in question.upper():
+                return token
+        return ""
+
+    def _cleanup_stale_db_orders(self):
+        """On startup, expire DB trades that are still 'pending' but market has resolved."""
+        try:
+            stale = self.trade_log.get_stale_pending_trades()
+        except Exception:
+            stale = []
+        if not stale:
+            return
+        now = time.time()
+        count = 0
+        for trade in stale:
+            res_ts = trade.get("resolution_ts", 0)
+            if res_ts > 0 and now > res_ts:
+                self.trade_log.update_trade_status(trade["id"], "expired")
+                count += 1
+        if count:
+            logger.info(f"Startup cleanup: expired {count} stale pending trades")

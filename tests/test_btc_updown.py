@@ -384,13 +384,14 @@ class TestMakerBidPrice:
 
         mock_clob = make_mock_clob()
 
+        # Use moderate delta to keep bid within max_ask (0.85)
         delta_info = {
-            "delta_pct": -0.0015, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "delta_pct": -0.0008, "window_progress": 0.8,
+            "time_remaining": 700, "dynamic_vol": 0.0025,
+            "resolution_ts": time.time() + 700,
         }
 
-        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.3, mock_clob)
+        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.2, mock_clob)
         assert signal is not None
 
         # Verify EV matches zero-fee formula
@@ -438,13 +439,14 @@ class TestMakerBidPrice:
 
         mock_clob = make_mock_clob()
 
+        # Use moderate delta + long time_remaining to stay on maker path
         delta_info = {
-            "delta_pct": -0.0015, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "delta_pct": -0.0008, "window_progress": 0.8,
+            "time_remaining": 700, "dynamic_vol": 0.0025,
+            "resolution_ts": time.time() + 700,
         }
 
-        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.3, mock_clob)
+        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.2, mock_clob)
         assert signal is not None
         assert signal.order_type == "GTC"
         assert signal.post_only is True
@@ -461,14 +463,14 @@ class TestMakerBidPrice:
 
         mock_clob = make_mock_clob()
 
-        resolution_ts = time.time() + 120
+        resolution_ts = time.time() + 700
         delta_info = {
-            "delta_pct": -0.0015, "window_progress": 0.8,
-            "time_remaining": 120, "dynamic_vol": 0.0010,
+            "delta_pct": -0.0008, "window_progress": 0.8,
+            "time_remaining": 700, "dynamic_vol": 0.0025,
             "resolution_ts": resolution_ts,
         }
 
-        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.3, mock_clob)
+        signal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info, -0.2, mock_clob)
         assert signal is not None
         assert signal.cancel_after_ts == pytest.approx(resolution_ts - 30, abs=0.1)
 
@@ -503,8 +505,9 @@ class TestPaperMakerOrders:
         assert result["trade_id"] == 1
         assert result["fill_price"] == 0.55
         assert result["size"] == 1.50
-        # Balance not deducted yet (derived from DB)
-        assert executor.get_balance() == 10.0
+        # Balance reduced by reserved capital for pending order
+        actual_cost = 1.50 * 0.55
+        assert executor.get_balance() == pytest.approx(10.0 - actual_cost, abs=0.01)
 
     def test_paper_fill_order_creates_position(self):
         """fill_order() creates position and updates trade status."""
@@ -536,35 +539,8 @@ class TestPaperMakerOrders:
 # --- Order manager tests ---
 
 class TestOrderManager:
-    def test_order_manager_probabilistic_fill(self):
-        """Mock random to verify fill triggers at right probability."""
-        from src.core.order_manager import OrderManager, PAPER_BASE_FILL_RATE
-
-        trade_log = MagicMock()
-        om = OrderManager(trade_log)
-
-        order = {
-            "trade_id": 1, "fill_price": 0.55, "token_id": "t1",
-            "size": 1.5, "market_id": "c1", "outcome": "Down",
-            "market_question": "Q?", "confidence": 0.60,
-            "cancel_after_ts": time.time() + 1000,
-        }
-        om.track_order(order)
-
-        executor = MagicMock()
-        executor.paper = MagicMock()
-
-        # fill_prob = 0.35 * (1 + 0.60) = 0.56
-        # random returns 0.20 < 0.56 → should fill
-        with patch("src.core.order_manager.random.random", return_value=0.20):
-            filled = om.check_pending_orders(None, executor, paper_mode=True)
-
-        assert len(filled) == 1
-        executor.paper.fill_order.assert_called_once_with(order)
-        assert len(om.get_pending_orders()) == 0
-
-    def test_order_manager_probabilistic_no_fill(self):
-        """When random is above threshold, order stays pending."""
+    def test_order_manager_market_price_fill(self):
+        """Fill triggers when CLOB ask drops to bid price (adverse selection)."""
         from src.core.order_manager import OrderManager
 
         trade_log = MagicMock()
@@ -572,19 +548,49 @@ class TestOrderManager:
 
         order = {
             "trade_id": 1, "fill_price": 0.55, "token_id": "t1",
-            "size": 1.5, "market_id": "c1", "outcome": "Down",
+            "size": 1.5, "cost": 0.825, "market_id": "c1", "outcome": "Down",
             "market_question": "Q?", "confidence": 0.60,
             "cancel_after_ts": time.time() + 1000,
         }
         om.track_order(order)
 
+        # Mock CLOB: ask dropped to 0.50 <= bid 0.55 → should fill
+        clob_client = MagicMock()
+        clob_client.get_price.return_value = {"bid": 0.48, "ask": 0.50, "mid": 0.49}
+
+        executor = MagicMock()
+        executor.paper = MagicMock()
+        executor.paper.fill_order.return_value = {"status": "filled", "position_id": 1}
+
+        filled = om.check_pending_orders(clob_client, executor, paper_mode=True)
+
+        assert len(filled) == 1
+        executor.paper.fill_order.assert_called_once_with(order)
+        assert len(om.get_pending_orders()) == 0
+
+    def test_order_manager_no_fill_when_ask_above_bid(self):
+        """Order stays pending when CLOB ask is above our bid."""
+        from src.core.order_manager import OrderManager
+
+        trade_log = MagicMock()
+        om = OrderManager(trade_log)
+
+        order = {
+            "trade_id": 1, "fill_price": 0.55, "token_id": "t1",
+            "size": 1.5, "cost": 0.825, "market_id": "c1", "outcome": "Down",
+            "market_question": "Q?", "confidence": 0.60,
+            "cancel_after_ts": time.time() + 1000,
+        }
+        om.track_order(order)
+
+        # Mock CLOB: ask at 0.62 > bid 0.55 → should NOT fill
+        clob_client = MagicMock()
+        clob_client.get_price.return_value = {"bid": 0.58, "ask": 0.62, "mid": 0.60}
+
         executor = MagicMock()
         executor.paper = MagicMock()
 
-        # fill_prob = 0.35 * (1 + 0.60) = 0.56
-        # random returns 0.80 → should NOT fill
-        with patch("src.core.order_manager.random.random", return_value=0.80):
-            filled = om.check_pending_orders(None, executor, paper_mode=True)
+        filled = om.check_pending_orders(clob_client, executor, paper_mode=True)
 
         assert len(filled) == 0
         executor.paper.fill_order.assert_not_called()
@@ -631,7 +637,7 @@ class TestDynamicVol:
         assert prob_default == pytest.approx(prob_explicit, abs=0.001)
 
     def test_high_vol_widens_min_edge(self):
-        strategy = make_strategy(btc_updown_min_edge=0.05, btc_updown_max_ask=0.90)
+        strategy = make_strategy(btc_updown_min_edge=0.01, btc_updown_max_ask=0.90)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -644,24 +650,25 @@ class TestDynamicVol:
         # Moderate delta for Down — would pass at normal vol
         delta_info_normal = {
             "delta_pct": -0.0012, "window_progress": 0.7,
-            "time_remaining": 90, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 90,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
         }
         signal_normal, _ = strategy._evaluate_both_sides(market, "BTC", delta_info_normal, -0.2, mock_clob)
 
-        # Same delta but 3x vol → effective_min_edge = 0.15, much harder to pass
+        # Same delta but 3x vol → effective_min_edge = 0.03, harder to pass
+        # and probability is lower (delta normalized by higher vol)
         delta_info_high_vol = {
             "delta_pct": -0.0012, "window_progress": 0.7,
-            "time_remaining": 90, "dynamic_vol": 0.0030,
-            "resolution_ts": time.time() + 90,
+            "time_remaining": 700, "dynamic_vol": 0.0030,
+            "resolution_ts": time.time() + 700,
         }
         signal_high_vol, _ = strategy._evaluate_both_sides(market, "BTC", delta_info_high_vol, -0.2, mock_clob)
 
-        # At normal vol it should trade; at 3x vol the probability is lower AND
-        # the min_edge is higher, so it may be rejected
+        # At normal vol it should trade
         assert signal_normal is not None
+        # High vol lowers confidence (delta normalized by larger vol)
         if signal_high_vol is not None:
-            assert signal_high_vol.expected_value < signal_normal.expected_value
+            assert signal_high_vol.confidence < signal_normal.confidence
 
     def test_compute_atr_basic(self):
         from src.market_data.binance_client import BinanceClient
@@ -691,7 +698,7 @@ class TestDynamicVol:
 
 class TestIntegration:
     def test_full_analyze_produces_signal(self):
-        strategy = make_strategy(btc_updown_min_edge=0.03, btc_updown_max_ask=0.90)
+        strategy = make_strategy(btc_updown_min_edge=0.01, btc_updown_max_ask=0.90)
         now = time.time()
         start_ts = now - 150  # started 2.5 min ago (progress ~0.5)
         start_ts_ms = start_ts * 1000
@@ -811,7 +818,8 @@ class TestMultiAssetInterval:
 class TestPredictionTracking:
     def test_prediction_logged_for_each_candidate(self):
         """Every evaluated outcome gets a prediction entry."""
-        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05)
+        # Disable min_confidence to test prediction logging for all candidates
+        strategy = make_strategy(btc_updown_maker_edge_cushion=0.05, btc_updown_min_confidence=0.0)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -823,8 +831,8 @@ class TestPredictionTracking:
 
         delta_info = {
             "delta_pct": -0.0015, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "time_remaining": 700, "dynamic_vol": 0.0010,
+            "resolution_ts": time.time() + 700,
         }
 
         signal, predictions = strategy._evaluate_both_sides(
@@ -854,14 +862,15 @@ class TestPredictionTracking:
 
         mock_clob = make_mock_clob()
 
+        # Use moderate delta to keep bid within max_ask
         delta_info = {
-            "delta_pct": -0.0015, "window_progress": 0.8,
-            "time_remaining": 60, "dynamic_vol": 0.0010,
-            "resolution_ts": time.time() + 60,
+            "delta_pct": -0.0008, "window_progress": 0.8,
+            "time_remaining": 700, "dynamic_vol": 0.0025,
+            "resolution_ts": time.time() + 700,
         }
 
         signal, predictions = strategy._evaluate_both_sides(
-            market, "BTC", delta_info, -0.3, mock_clob, interval="5m",
+            market, "BTC", delta_info, -0.2, mock_clob, interval="5m",
         )
         assert signal is not None
         # The winning side should be marked as traded
@@ -871,7 +880,7 @@ class TestPredictionTracking:
 
     def test_predictions_collected_in_analyze(self):
         """analyze() populates _pending_predictions."""
-        strategy = make_strategy(btc_updown_min_edge=0.03, btc_updown_max_ask=0.90)
+        strategy = make_strategy(btc_updown_min_edge=0.03, btc_updown_max_ask=0.90, btc_updown_min_confidence=0.0)
         now = time.time()
         start_ts = now - 150
         start_ts_ms = start_ts * 1000
@@ -1199,7 +1208,8 @@ class TestVolRatioCap:
 
     def test_vol_ratio_floor_at_1(self):
         """Vol ratio below 1.0 is floored, never shrinking min_edge."""
-        strategy = make_strategy()
+        # Disable min_confidence to test vol ratio behavior with neutral delta
+        strategy = make_strategy(btc_updown_min_confidence=0.0)
         market = {
             "outcomes": ["Up", "Down"],
             "clobTokenIds": ["token_up", "token_down"],
@@ -1211,8 +1221,8 @@ class TestVolRatioCap:
         # Low vol: 0.0005, ratio would be 0.2 but clamped to 1.0
         delta_info = {
             "delta_pct": 0.0, "window_progress": 0.5,
-            "time_remaining": 150, "dynamic_vol": 0.0005,
-            "resolution_ts": time.time() + 150,
+            "time_remaining": 700, "dynamic_vol": 0.0005,
+            "resolution_ts": time.time() + 700,
         }
         signal, preds = strategy._evaluate_both_sides(market, "BTC", delta_info, 0.0, mock_clob)
         # effective_min_edge = 0.03 * 1.0 = 0.03 (not 0.03 * 0.2 = 0.006)

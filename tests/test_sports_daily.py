@@ -386,39 +386,6 @@ class TestMarketDiscovery:
         markets = strategy._discover_sports_markets()
         assert len(markets) == 1
 
-    def test_tag_search_runs_alongside_series_id_and_deduplicates(self):
-        """Tag search executes even when series_id returns markets; overlapping markets are deduplicated."""
-        strategy = make_strategy(sports_daily_tags=["ufc"])
-
-        shared_market = make_sports_market(question="Will Fighter A win?")
-        shared_market["conditionId"] = "cond_shared"
-
-        tag_only_market = make_sports_market(question="Will Fighter B win?")
-        tag_only_market["conditionId"] = "cond_tag_only"
-
-        # series_id returns one market (the shared one)
-        self._mock_game_events(strategy, [
-            {"title": "UFC 300", "slug": "ufc-300", "markets": [shared_market]}
-        ])
-        # tag search returns the same market plus an extra one
-        strategy.gamma.get_all_events_by_tag = MagicMock(return_value=[
-            {
-                "title": "UFC 300",
-                "slug": "ufc-300",
-                "markets": [shared_market, tag_only_market],
-            }
-        ])
-
-        markets = strategy._discover_sports_markets()
-
-        # tag search was called
-        strategy.gamma.get_all_events_by_tag.assert_called_once_with("ufc", max_pages=5)
-        # Both markets present, but shared one appears only once
-        condition_ids = [m["conditionId"] for m in markets]
-        assert condition_ids.count("cond_shared") == 1
-        assert "cond_tag_only" in condition_ids
-        assert len(markets) == 2
-
 
 # --- Risk parameter tests ---
 

@@ -219,7 +219,8 @@ class SportsDailyStrategy(Strategy):
         if isinstance(tags, list):
             for tag in tags:
                 label = tag.get("label", tag) if isinstance(tag, dict) else str(tag)
-                if label.lower() in SPORT_KEYWORDS or "sport" in label.lower():
+                normalized = label.lower().replace("-", " ")
+                if normalized in SPORT_KEYWORDS or "sport" in normalized:
                     return True
 
         # Check game patterns in title

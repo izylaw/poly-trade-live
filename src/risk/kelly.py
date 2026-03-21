@@ -14,7 +14,7 @@ def half_kelly(win_prob: float, payout_ratio: float, available_balance: float,
     position_size = max(min(position_size, max_trade), 0.0)
 
     if position_size < min_trade:
-        return 0.0
+        position_size = min_trade  # bump to CLOB minimum; caller checks cost vs balance
 
     return round(position_size, 2)
 
