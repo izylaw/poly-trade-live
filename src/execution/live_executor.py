@@ -103,7 +103,7 @@ class LiveExecutor:
     def sell_position(self, position: dict, sell_price: float) -> dict:
         """Sell an open position on the CLOB to take profit."""
         try:
-            self.clob.post_order(
+            order_result = self.clob.post_order(
                 token_id=position["token_id"],
                 side="SELL",
                 price=sell_price,
@@ -114,6 +114,7 @@ class LiveExecutor:
             logger.error(f"Live sell failed for pos#{position['id']}: {e}")
             return {"status": "error", "reason": str(e)}
 
+        order_id = order_result.get("orderID", order_result.get("id", "unknown"))
         pnl = (sell_price - position["entry_price"]) * position["size"]
         self.trade_log.close_position(position["id"], pnl)
 
@@ -136,16 +137,16 @@ class LiveExecutor:
             "pnl": pnl,
             "paper_trade": False,
             "resolution_ts": position.get("resolution_ts", 0),
-            "notes": "take_profit_sell",
+            "notes": f"take_profit_sell order_id={order_id}",
         }
         self.trade_log.log_trade(trade_record)
 
         logger.info(
-            f"LIVE TAKE-PROFIT SELL: pos#{position['id']} {position['outcome']} "
+            f"LIVE TAKE-PROFIT SELL: {order_id} pos#{position['id']} {position['outcome']} "
             f"entry=${position['entry_price']:.4f} exit=${sell_price:.4f} "
             f"pnl=${pnl:+.2f}"
         )
-        return {"status": "filled", "pnl": pnl, "position_id": position["id"]}
+        return {"status": "filled", "pnl": pnl, "position_id": position["id"], "order_id": order_id}
 
     def get_balance(self) -> float:
         return self.clob.get_balance()

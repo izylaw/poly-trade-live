@@ -115,6 +115,9 @@ class TradingEngine:
         # Take-profit check
         if self.settings.take_profit_enabled:
             self._check_take_profit()
+            # Refresh balance — take-profit sells may have changed it
+            balance = self.executor.get_balance()
+            self.balance_mgr.update(balance)
 
         # 2. ANALYZE - collect signals from enabled strategies
         enabled = self.aggression_tuner.get_enabled_strategies()
@@ -495,14 +498,12 @@ class TradingEngine:
         if not candidates:
             return
 
-        # Batch fetch prices
+        # Batch fetch prices (single parallel request instead of sequential calls)
         token_ids = list(set(p["token_id"] for p in candidates))
-        prices = {}
-        for tid in token_ids:
-            try:
-                prices[tid] = self.clob.get_price(tid)
-            except Exception:
-                pass
+        try:
+            prices = self.clob.get_orderbooks_batch(token_ids)
+        except Exception:
+            prices = {}
 
         sold_count = 0
         for pos in candidates:
