@@ -1,6 +1,6 @@
 """Tests for take-profit sell feature."""
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import pytest
 
 
@@ -150,6 +150,7 @@ class TestEngineTakeProfit:
         engine.position_tracker = MagicMock()
         engine.position_tracker.get_open_positions.return_value = positions
         engine.clob = MagicMock()
+        engine.clob.get_orderbooks_batch.return_value = prices
         engine.clob.get_price.side_effect = lambda tid: prices.get(tid)
         engine.executor = MagicMock()
         engine.executor.sell_position.return_value = {"status": "filled", "pnl": 1.0}
@@ -225,4 +226,4 @@ class TestEngineTakeProfit:
         engine._check_take_profit()
 
         assert "BTC" in engine._asset_cooldowns
-        assert engine._asset_cooldowns["BTC"] == 2  # cycle 1 + 1
+        assert engine._asset_cooldowns["BTC"] == 3  # cycle 1 + 2

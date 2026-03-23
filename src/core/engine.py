@@ -1,3 +1,4 @@
+import math
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -115,6 +116,8 @@ class TradingEngine:
         # Take-profit check
         if self.settings.take_profit_enabled:
             self._check_take_profit()
+            # Refresh local balance in case take-profit logic updated it
+            balance = self.balance_mgr.balance
 
         # 2. ANALYZE - collect signals from enabled strategies
         enabled = self.aggression_tuner.get_enabled_strategies()
@@ -495,14 +498,23 @@ class TradingEngine:
         if not candidates:
             return
 
-        # Batch fetch prices
+        # Batch fetch prices (with per-token fallback)
         token_ids = list(set(p["token_id"] for p in candidates))
         prices = {}
-        for tid in token_ids:
-            try:
-                prices[tid] = self.clob.get_price(tid)
-            except Exception:
-                pass
+        try:
+            batch = self.clob.get_orderbooks_batch(token_ids)
+            if isinstance(batch, dict):
+                for tid in token_ids:
+                    price_data = batch.get(tid)
+                    if price_data:
+                        prices[tid] = price_data
+        except Exception as e:
+            logger.warning(f"Batch price fetch failed in _check_take_profit, falling back to per-token: {e}")
+            for tid in token_ids:
+                try:
+                    prices[tid] = self.clob.get_price(tid)
+                except Exception:
+                    pass
 
         sold_count = 0
         for pos in candidates:
@@ -522,14 +534,14 @@ class TradingEngine:
             if gain_pct < self.settings.take_profit_pct:
                 continue
 
-            sell_price = round(current_bid, 2)
+            sell_price = math.floor(current_bid * 100) / 100
             result = self.executor.sell_position(pos, sell_price)
             if result.get("status") == "filled":
                 sold_count += 1
                 self.circuit_breaker.record_win()
                 pos_asset = self._extract_asset_from_position(pos)
                 if pos_asset:
-                    self._asset_cooldowns[pos_asset] = self._cycle_count + 1
+                    self._asset_cooldowns[pos_asset] = self._cycle_count + 2
                 logger.info(
                     f"TAKE-PROFIT: pos#{pos['id']} {pos.get('outcome')} | "
                     f"entry=${entry_price:.4f} bid=${current_bid:.4f} "

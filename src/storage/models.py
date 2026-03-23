@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     resolution_ts REAL,
     traded INTEGER NOT NULL DEFAULT 0,
     trade_id INTEGER,
+    skip_reason TEXT,
     paper_trade INTEGER NOT NULL DEFAULT 1,
     resolved INTEGER NOT NULL DEFAULT 0,
     actual_correct INTEGER,

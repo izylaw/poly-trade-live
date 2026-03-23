@@ -12,7 +12,7 @@ _listener = None
 def setup_logger(name: str = "poly-trade", level: str = "INFO", log_dir: Path | None = None) -> logging.Logger:
     global _listener
     logger = logging.getLogger(name)
-    if logger.handlers:
+    if logger.handlers or _listener is not None:
         return logger
 
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -22,7 +22,7 @@ def setup_logger(name: str = "poly-trade", level: str = "INFO", log_dir: Path | 
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Console handler (still sync — stdout is fast)
+    # Console handler (runs on listener thread via QueueHandler)
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
 
@@ -36,8 +36,16 @@ def setup_logger(name: str = "poly-trade", level: str = "INFO", log_dir: Path | 
         handlers.append(fh)
 
     # Queue-based async logging for all handlers
-    log_queue = queue.Queue(-1)  # unbounded
-    queue_handler = logging.handlers.QueueHandler(log_queue)
+    log_queue = queue.Queue(maxsize=10_000)
+
+    class _DropOnFullQueueHandler(logging.handlers.QueueHandler):
+        def enqueue(self, record):
+            try:
+                self.queue.put_nowait(record)
+            except queue.Full:
+                pass  # drop low-priority logs under backpressure
+
+    queue_handler = _DropOnFullQueueHandler(log_queue)
     logger.addHandler(queue_handler)
 
     _listener = logging.handlers.QueueListener(log_queue, *handlers, respect_handler_level=True)

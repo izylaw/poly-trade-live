@@ -103,7 +103,7 @@ class LiveExecutor:
     def sell_position(self, position: dict, sell_price: float) -> dict:
         """Sell an open position on the CLOB to take profit."""
         try:
-            self.clob.post_order(
+            sell_result = self.clob.post_order(
                 token_id=position["token_id"],
                 side="SELL",
                 price=sell_price,
@@ -114,6 +114,7 @@ class LiveExecutor:
             logger.error(f"Live sell failed for pos#{position['id']}: {e}")
             return {"status": "error", "reason": str(e)}
 
+        order_id = sell_result.get("orderID", sell_result.get("id", "unknown")) if isinstance(sell_result, dict) else "unknown"
         pnl = (sell_price - position["entry_price"]) * position["size"]
         self.trade_log.close_position(position["id"], pnl)
 
@@ -136,7 +137,7 @@ class LiveExecutor:
             "pnl": pnl,
             "paper_trade": False,
             "resolution_ts": position.get("resolution_ts", 0),
-            "notes": "take_profit_sell",
+            "notes": f"take_profit_sell order_id={order_id}",
         }
         self.trade_log.log_trade(trade_record)
 
