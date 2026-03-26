@@ -43,7 +43,16 @@ def setup_logger(name: str = "poly-trade", level: str = "INFO", log_dir: Path | 
             try:
                 self.queue.put_nowait(record)
             except queue.Full:
-                pass  # drop low-priority logs under backpressure
+                if record.levelno < logging.WARNING:
+                    return  # drop DEBUG/INFO under backpressure
+                try:
+                    self.queue.put(record, timeout=0.5)
+                except queue.Full:
+                    fallback = logging.StreamHandler(sys.stderr)
+                    try:
+                        fallback.emit(record)
+                    finally:
+                        fallback.close()
 
     queue_handler = _DropOnFullQueueHandler(log_queue)
     logger.addHandler(queue_handler)
