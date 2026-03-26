@@ -148,6 +148,9 @@ class WeatherTemperatureStrategy(Strategy):
             else:
                 model_prob = self._compute_bucket_probability(lower, upper, forecast_high, sigma)
 
+            # Clamp confidence — never be 100% certain about weather
+            model_prob = min(model_prob, 0.95)
+
             # Get market prices
             # Weather markets have thin CLOB books (asks at 0.999 are placeholders).
             # Gamma bestBid/bestAsk reflects actual market activity and is more reliable.
