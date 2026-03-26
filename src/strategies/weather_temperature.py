@@ -65,6 +65,7 @@ class WeatherTemperatureStrategy(Strategy):
         """Analyze all sub-markets for a single weather event, return best signal."""
         parsed = self._parse_event_slug(event_slug)
         if not parsed:
+            logger.debug(f"weather: skipping unparseable slug: {event_slug}")
             return None
         city_key, target_date = parsed
 
@@ -77,6 +78,12 @@ class WeatherTemperatureStrategy(Strategy):
             return None
 
         use_ensemble = ensemble is not None and len(ensemble.get("members", [])) >= 10
+        if not use_ensemble and ensemble is not None:
+            n = len(ensemble.get("members", []))
+            logger.info(f"weather: {city_key} ensemble returned only {n} members, using deterministic fallback")
+        if not use_ensemble and not forecast:
+            logger.info(f"weather: {city_key} {target_date} — no ensemble AND no forecast")
+            return None
         if use_ensemble:
             members = ensemble["members"]
             unit = ensemble["unit"]
@@ -102,6 +109,9 @@ class WeatherTemperatureStrategy(Strategy):
         # Parse and score each sub-market
         best_signal = None
         best_ev = 0.0
+        best_edge_seen = -1.0  # track highest edge for diagnostics
+        best_edge_bucket = ""
+        n_parsed = 0
 
         for market in event_markets:
             question = market.get("question", "")
@@ -168,7 +178,11 @@ class WeatherTemperatureStrategy(Strategy):
             ev = model_prob * (1.0 - best_ask) - (1.0 - model_prob) * best_ask
 
             # Bucket label for logging
-            bucket_label = self._bucket_label(lower, upper, forecast["unit"])
+            bucket_label = self._bucket_label(lower, upper, unit)
+            n_parsed += 1
+            if edge > best_edge_seen:
+                best_edge_seen = edge
+                best_edge_bucket = bucket_label
 
             # Parse resolution timestamp
             end_date = market.get("endDate", "")
@@ -242,6 +256,15 @@ class WeatherTemperatureStrategy(Strategy):
                     slug=event_slug,
                     asset=city_key,
                 )
+
+        if best_signal is None and n_parsed > 0:
+            prob_src = "ensemble" if use_ensemble else f"normal(σ={sigma:.1f})"
+            logger.info(
+                f"weather: {city_key} {target_date} — no signal | "
+                f"best_edge={best_edge_seen:+.3f} at {best_edge_bucket} | "
+                f"forecast={forecast_high:.1f} ({prob_src}) | "
+                f"{n_parsed} buckets scored"
+            )
 
         return best_signal
 
