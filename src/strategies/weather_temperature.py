@@ -148,32 +148,25 @@ class WeatherTemperatureStrategy(Strategy):
             else:
                 model_prob = self._compute_bucket_probability(lower, upper, forecast_high, sigma)
 
-            # Get market prices — priority: CLOB book > Gamma bestBid/Ask > outcomePrices
+            # Get market prices
+            # Weather markets have thin CLOB books (asks at 0.999 are placeholders).
+            # Gamma bestBid/bestAsk reflects actual market activity and is more reliable.
             best_ask = None
             best_bid = None
 
-            # Priority 1: CLOB orderbook (most accurate, real-time)
-            try:
-                price_data = clob_client.get_price(token_id)
-                if price_data:
-                    best_ask = price_data.get("ask")
-                    best_bid = price_data.get("bid")
-            except Exception:
-                pass
-
-            # Priority 2: Gamma bestBid/bestAsk (actual book prices, may be stale)
-            if best_ask is None and market.get("bestAsk") is not None:
+            # Priority 1: Gamma bestBid/bestAsk (reflects real market pricing)
+            if market.get("bestAsk") is not None:
                 try:
                     best_ask = float(market["bestAsk"])
                 except (ValueError, TypeError):
                     pass
-            if best_bid is None and market.get("bestBid") is not None:
+            if market.get("bestBid") is not None:
                 try:
                     best_bid = float(market["bestBid"])
                 except (ValueError, TypeError):
                     pass
 
-            # Priority 3: outcomePrices (implied probability — last resort, often misleading)
+            # Priority 2: outcomePrices (implied probability from last trades)
             if best_ask is None:
                 outcome_prices = market.get("outcomePrices", [])
                 if isinstance(outcome_prices, str):
@@ -181,8 +174,11 @@ class WeatherTemperatureStrategy(Strategy):
                         outcome_prices = _json.loads(outcome_prices)
                     except (ValueError, TypeError):
                         outcome_prices = []
-                best_ask = float(outcome_prices[0]) if outcome_prices else 1.0
+                if outcome_prices:
+                    best_ask = float(outcome_prices[0])
 
+            if best_ask is None:
+                best_ask = 1.0
             if best_bid is None:
                 best_bid = 0.0
 
