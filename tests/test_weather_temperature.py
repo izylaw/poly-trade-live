@@ -1,8 +1,13 @@
 """Tests for weather_temperature strategy."""
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 import math
 import pytest
+
+
+def _tomorrow_noon():
+    """Return ISO 8601 string for tomorrow at noon UTC (always in the future, within 72h)."""
+    return (datetime.now(timezone.utc) + timedelta(hours=24)).strftime("%Y-%m-%dT12:00:00Z")
 
 
 class TestParseEventSlug:
@@ -259,7 +264,7 @@ class TestAnalyzeIntegration:
                     "clobTokenIds": '["token_yes", "token_no"]',
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.10", "0.90"]',
-                    "endDate": "2026-03-26T12:00:00Z",
+                    "endDate": _tomorrow_noon(),
                     "active": True,
                     "closed": False,
                     "volume": "1000",
@@ -271,7 +276,7 @@ class TestAnalyzeIntegration:
                     "clobTokenIds": '["token_peak_yes", "token_peak_no"]',
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.15", "0.85"]',
-                    "endDate": "2026-03-26T12:00:00Z",
+                    "endDate": _tomorrow_noon(),
                     "active": True,
                     "closed": False,
                     "volume": "1000",
@@ -293,11 +298,18 @@ class TestAnalyzeIntegration:
         }
 
         clob = MagicMock()
-        clob.get_price.return_value = None  # use Gamma prices
+        # CLOB returns realistic orderbook prices (mispriced: ask much lower than model prob)
+        def mock_price(tid):
+            if tid == "token_yes":
+                return {"bid": 0.08, "ask": 0.10}
+            if tid == "token_peak_yes":
+                return {"bid": 0.13, "ask": 0.15}
+            return None
+        clob.get_price.side_effect = mock_price
 
         signals = strategy.analyze([], clob)
 
-        # Should generate a signal — 80-81°F bucket has ~23/31=74% ensemble prob vs ask 0.15
+        # Should generate a signal — 80-81°F bucket has ~74% ensemble prob vs ask 0.15
         assert len(signals) == 1
         assert signals[0].strategy == "weather_temperature"
         assert signals[0].asset == "atlanta"
@@ -335,10 +347,11 @@ class TestAnalyzeIntegration:
         }
 
         clob = MagicMock()
-        clob.get_price.return_value = None
+        # CLOB ask is 0.95 — no edge when ensemble says 100%
+        clob.get_price.return_value = {"bid": 0.94, "ask": 0.95}
 
         signals = strategy.analyze([], clob)
-        assert len(signals) == 0  # no edge
+        assert len(signals) == 0  # no edge (1.0 - 0.95 = 0.05 < min_edge 0.08)
 
     def test_predictions_logged_for_all_buckets(self):
         strategy = self._make_strategy()
@@ -353,7 +366,7 @@ class TestAnalyzeIntegration:
                     "clobTokenIds": f'["tok_{lo}_yes", "tok_{lo}_no"]',
                     "outcomes": '["Yes", "No"]',
                     "outcomePrices": '["0.10", "0.90"]',
-                    "endDate": "2026-03-26T12:00:00Z",
+                    "endDate": _tomorrow_noon(),
                     "active": True,
                     "closed": False,
                     "volume": "1000",
@@ -373,7 +386,7 @@ class TestAnalyzeIntegration:
         }
 
         clob = MagicMock()
-        clob.get_price.return_value = None
+        clob.get_price.return_value = {"bid": 0.08, "ask": 0.10}
 
         strategy.analyze([], clob)
         assert len(strategy._pending_predictions) == 5  # one per sub-market
