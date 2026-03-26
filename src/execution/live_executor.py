@@ -100,6 +100,54 @@ class LiveExecutor:
             result["asset"] = trade.signal.asset
         return result
 
+    def sell_position(self, position: dict, sell_price: float) -> dict:
+        """Sell an open position on the CLOB to take profit."""
+        try:
+            sell_result = self.clob.post_order(
+                token_id=position["token_id"],
+                side="SELL",
+                price=sell_price,
+                size=position["size"],
+                order_type="FOK",
+            )
+        except Exception as e:
+            logger.error(f"Live sell failed for pos#{position['id']}: {e}")
+            return {"status": "error", "reason": str(e)}
+
+        order_id = sell_result.get("orderID", sell_result.get("id", "unknown")) if isinstance(sell_result, dict) else "unknown"
+        pnl = (sell_price - position["entry_price"]) * position["size"]
+        self.trade_log.close_position(position["id"], pnl)
+
+        trade_record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_id": position["market_id"],
+            "market_question": position.get("market_question", ""),
+            "token_id": position["token_id"],
+            "side": "SELL",
+            "outcome": position["outcome"],
+            "price": sell_price,
+            "size": position["size"],
+            "cost": 0,
+            "strategy": position.get("strategy", "unknown"),
+            "confidence": 0,
+            "kelly_fraction": 0,
+            "order_type": "FOK",
+            "status": "filled",
+            "fill_price": sell_price,
+            "pnl": pnl,
+            "paper_trade": False,
+            "resolution_ts": position.get("resolution_ts", 0),
+            "notes": f"take_profit_sell order_id={order_id}",
+        }
+        self.trade_log.log_trade(trade_record)
+
+        logger.info(
+            f"LIVE TAKE-PROFIT SELL: pos#{position['id']} {position['outcome']} "
+            f"entry=${position['entry_price']:.4f} exit=${sell_price:.4f} "
+            f"pnl=${pnl:+.2f}"
+        )
+        return {"status": "filled", "pnl": pnl, "position_id": position["id"]}
+
     def get_balance(self) -> float:
         return self.clob.get_balance()
 

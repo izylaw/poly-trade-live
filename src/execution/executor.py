@@ -33,6 +33,16 @@ class Executor:
             return self.paper.get_open_positions()
         return self.live.get_open_positions()
 
+    def sell_position(self, position: dict, sell_price: float) -> dict:
+        if self.settings.paper_trading:
+            if self.paper is None:
+                raise RuntimeError("Paper executor not initialized")
+            return self.paper.sell_position(position, sell_price)
+        else:
+            if self.live is None:
+                raise RuntimeError("Live executor not initialized")
+            return self.live.sell_position(position, sell_price)
+
     @property
     def mode(self) -> str:
         return "paper" if self.settings.paper_trading else "live"

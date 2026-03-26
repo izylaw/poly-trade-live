@@ -185,8 +185,8 @@ class TradeLog:
             """INSERT INTO predictions
                (timestamp, strategy, asset, interval, market_id, token_id,
                 outcome, est_prob, bid_price, delta_pct, window_progress,
-                momentum, dynamic_vol, resolution_ts, traded, trade_id, paper_trade)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                momentum, dynamic_vol, resolution_ts, traded, trade_id, skip_reason, paper_trade)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pred.get("timestamp", datetime.now(timezone.utc).isoformat()),
                 pred["strategy"],
@@ -204,6 +204,7 @@ class TradeLog:
                 pred.get("resolution_ts"),
                 1 if pred.get("traded") else 0,
                 pred.get("trade_id"),
+                pred.get("skip_reason"),
                 0 if pred.get("paper_trade") is False else 1,
             ),
         )

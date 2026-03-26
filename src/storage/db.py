@@ -67,4 +67,11 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    # Migration: add skip_reason column to predictions if missing (existing DBs)
+    try:
+        conn.execute("ALTER TABLE predictions ADD COLUMN skip_reason TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     return conn
