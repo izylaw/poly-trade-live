@@ -138,4 +138,14 @@ DEFAULTS = {
     "llm_maker_edge_cushion": 0.05,
     "llm_intervals": ["1h", "4h"],
     "llm_daily_lookahead_days": 5,
+
+    # Weather Temperature strategy
+    "weather_min_edge": 0.08,              # min (model_prob - ask) to trade
+    "weather_base_sigma": 3.5,             # base forecast uncertainty (degrees) — calibrated via backtest
+    "weather_sigma_per_day": 0.5,          # additional uncertainty per day of horizon
+    "weather_max_hours_to_resolution": 72,  # only trade events within 3 days
+    "weather_maker_cushion": 0.03,         # bid = model_prob - cushion
+    "weather_min_volume": 500.0,           # minimum market volume
+    "weather_min_liquidity": 200.0,        # minimum market liquidity
+    "weather_max_positions": 3,            # max concurrent weather positions
 }

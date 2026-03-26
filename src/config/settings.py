@@ -148,6 +148,16 @@ class Settings(BaseSettings):
     llm_intervals: list[str] = DEFAULTS["llm_intervals"]
     llm_daily_lookahead_days: int = DEFAULTS["llm_daily_lookahead_days"]
 
+    # Weather Temperature strategy
+    weather_min_edge: float = DEFAULTS["weather_min_edge"]
+    weather_base_sigma: float = DEFAULTS["weather_base_sigma"]
+    weather_sigma_per_day: float = DEFAULTS["weather_sigma_per_day"]
+    weather_max_hours_to_resolution: int = DEFAULTS["weather_max_hours_to_resolution"]
+    weather_maker_cushion: float = DEFAULTS["weather_maker_cushion"]
+    weather_min_volume: float = DEFAULTS["weather_min_volume"]
+    weather_min_liquidity: float = DEFAULTS["weather_min_liquidity"]
+    weather_max_positions: int = DEFAULTS["weather_max_positions"]
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",

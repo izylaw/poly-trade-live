@@ -29,13 +29,14 @@ from src.strategies.btc_updown import BtcUpdownStrategy
 from src.strategies.crypto_hourly import CryptoHourlyStrategy
 from src.strategies.safe_compounder import SafeCompounderStrategy
 from src.strategies.sports_daily import SportsDailyStrategy
+from src.strategies.weather_temperature import WeatherTemperatureStrategy
 
 logger = logging.getLogger("poly-trade")
 
 
 ALL_STRATEGIES = [
     "high_probability", "arbitrage", "btc_updown", "crypto_hourly",
-    "safe_compounder", "sports_daily", "llm_crypto",
+    "safe_compounder", "sports_daily", "llm_crypto", "weather_temperature",
 ]
 
 
@@ -84,6 +85,7 @@ class Bot:
             CryptoHourlyStrategy(s, binance=binance),
             SafeCompounderStrategy(s, binance=binance),
             SportsDailyStrategy(s),
+            WeatherTemperatureStrategy(s),
         ]
 
         if s.llm_enabled:

@@ -44,6 +44,7 @@ class RiskManager:
         "high_probability": 0.06,
         "llm_crypto": 0.55,
         "arbitrage": 0.01,
+        "weather_temperature": 0.20,
     }
 
     STRATEGY_MAX_PER_MARKET = {
@@ -72,6 +73,7 @@ class RiskManager:
             "sports_daily": self.settings.sports_daily_max_positions,
             "btc_updown": self.settings.btc_updown_max_positions,
             "llm_crypto": self.settings.llm_max_positions,
+            "weather_temperature": self.settings.weather_max_positions,
         }
         return mapping.get(strategy)
 
